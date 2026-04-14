@@ -1,0 +1,8 @@
+# Computed results (reproducible via run_all_configs.sh + extract_results.py)
+results/nnv/
+results/*.png
+results/*.json
+
+# Exported NN binaries (reproducible via export_nn.py from .cache/nn_inputs/)
+nn/*.onnx
+nn/*.mat

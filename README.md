@@ -77,6 +77,10 @@ python scripts/simulation/visualize_simulation.py --tag roverlight_batch_nn --sa
 
 </details>
 
+### Baseline Comparison (NNV)
+
+See [`BASELINES.md`](BASELINES.md) and [`baselines/SETUP.md`](baselines/SETUP.md) for a comparison against [NNV 2.0](https://github.com/verivital/nnv) (approx-star + CORA zonotope reachability) on a single-obstacle Dubins car with a pure ReLU controller.
+
 ## Documentation
 
 | Document | Description |

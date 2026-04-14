@@ -10,7 +10,16 @@ RoverDark:
   RoverDark_MPC:
     state_resolution: [100, 100, 100]
     time_resolution: 100
-  
+
+  default:
+    state_resolution: [100, 100, 100]
+    time_resolution: 100
+
+RoverBaseline:
+  RoverBaseline_MPC:
+    state_resolution: [100, 100, 100]
+    time_resolution: 100
+
   default:
     state_resolution: [100, 100, 100]
     time_resolution: 100
