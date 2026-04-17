@@ -3,6 +3,7 @@
 Visualize GridInput from a tagged cache.
 
 Usage:
+  python scripts/grid_input/visualize_grid_input.py --tag RoverDark_MPC
   python scripts/grid_input/visualize_grid_input.py --tag TAG [--preset PRESET] [--save-dir DIR]
   python scripts/grid_input/visualize_grid_input.py --tag TAG --interactive  # Interactive mode
 """

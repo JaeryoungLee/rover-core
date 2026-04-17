@@ -123,6 +123,7 @@ tzdata==2025.2
 urllib3==2.5.0
 wadler_lindig==0.1.7
 wandb
-tensorboard==0.22.3
+# tensorboard==0.22.3
+tensorboard==2.20.0
 wcwidth==0.2.14
 zipp==3.23.0

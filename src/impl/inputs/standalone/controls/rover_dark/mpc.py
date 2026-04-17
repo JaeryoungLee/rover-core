@@ -183,7 +183,8 @@ class RoverDark_MPC(Input):
     time_invariant = True
     
     # CPU batching configuration (no GPU support)
-    _use_gpu = False
+    # _use_gpu = False
+    _use_gpu = True
     _batch_size = 100000  # Moderate batch size for CPU parallel MPC
 
     def __init__(

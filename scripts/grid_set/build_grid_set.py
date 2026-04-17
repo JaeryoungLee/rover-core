@@ -9,6 +9,8 @@ uncertainty limits, and saves a GridSet payload at .cache/grid_sets/{TAG}.pkl.
 Usage:
     # List available systems and GridInput tags
     python scripts/grid_set/build_grid_set.py --list
+    python scripts/grid_set/build_grid_set.py --system RoverDark --grid-input-tag RoverDark_MPC --tag RoverDark_MPC_Box
+
 
     # Build a new GridSet cache (errors if TAG exists)
     python scripts/grid_set/build_grid_set.py \

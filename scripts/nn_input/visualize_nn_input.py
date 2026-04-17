@@ -283,6 +283,7 @@ def main():
         print(f"Error: Cannot instantiate system '{system_name}': {e}")
         return
     nn_input = load_nn_input_by_tag(args.tag, system)
+    nn_input.type = meta.get('input_type', 'any')
     # Try to load the original training GridInput tag from metadata for comparison
     ref_grid = None
     try:
