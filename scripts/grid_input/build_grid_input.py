@@ -41,6 +41,7 @@ from src.utils.registry import (
     get_system_class,
     get_system_to_inputs_map,
 )
+from src.utils.cache_loaders import load_nn_input_by_tag, get_nn_input_metadata
 
 
 def list_available() -> None:
@@ -207,6 +208,7 @@ Examples:
     parser.add_argument('--list', action='store_true', help='List available systems and inputs')
     parser.add_argument('--system', type=str, help='System class name')
     parser.add_argument('--input', type=str, help='Input class name')
+    parser.add_argument('--nn-input-tag', type=str, dest='nn_input_tag', help='Load NNInput from cache by tag instead of by class name')
     parser.add_argument('--tag', type=str, help='Tag name for the cache file (required unless --list)')
     parser.add_argument('--config', type=str, default='config/resolutions.yaml', help='Path to grid resolution config')
     parser.add_argument('--force', action='store_true', help='Overwrite existing cache if it exists')
@@ -224,12 +226,15 @@ Examples:
         list_available()
         return
 
-    if not args.system or not args.input or not args.tag:
-        print("Error: --system, --input, and --tag are required")
+    if not args.system or not args.tag:
+        print("Error: --system and --tag are required")
+        sys.exit(1)
+    if not args.input and not args.nn_input_tag:
+        print("Error: either --input or --nn-input-tag is required")
         sys.exit(1)
 
     # Load resolution config
-    cfg = load_resolution_config(args.system, args.input, args.config)
+    cfg = load_resolution_config(args.system, args.input or args.nn_input_tag, args.config)
     cfg = _require_keys(cfg, ['state_resolution', 'time_resolution'])
     
     # Apply CLI convenience args as overrides
@@ -260,26 +265,33 @@ Examples:
             print(f"\n⚠ Overwriting existing cache: {cache_path.name}")
             cache_path.unlink()
 
-    # Resolve classes
+    # Resolve system class
     system_cls = get_system_class(args.system)
-    input_cls = get_input_class(args.input)
-    if input_cls is not None and input_cls.__name__ == 'GridInput':
-        input_cls = None
-
     if system_cls is None:
         print(f"Error: System '{args.system}' not found")
         sys.exit(1)
-    if input_cls is None:
-        print(f"Error: Input '{args.input}' not found")
-        sys.exit(1)
-    if not issubclass(system_cls, input_cls.system_class):
-        print(f"Error: Input '{args.input}' is not compatible with system '{args.system}'")
-        sys.exit(1)
 
-    # Instantiate and bind
     system = system_cls()
-    input_instance = input_cls()
-    input_instance.bind(system)
+
+    # Instantiate input — either by class name or from NN cache tag
+    if args.nn_input_tag:
+        nn_meta = get_nn_input_metadata(args.nn_input_tag)
+        input_instance = load_nn_input_by_tag(args.nn_input_tag, system)
+        input_instance.type = nn_meta.get('input_type', 'any')
+        input_name = f'NNInput({args.nn_input_tag})'
+    else:
+        input_cls = get_input_class(args.input)
+        if input_cls is not None and input_cls.__name__ == 'GridInput':
+            input_cls = None
+        if input_cls is None:
+            print(f"Error: Input '{args.input}' not found")
+            sys.exit(1)
+        if not issubclass(system_cls, input_cls.system_class):
+            print(f"Error: Input '{args.input}' is not compatible with system '{args.system}'")
+            sys.exit(1)
+        input_instance = input_cls()
+        input_instance.bind(system)
+        input_name = args.input
 
     # Build grids from config (already loaded above)
     state_grid_points = build_state_grid_points(system, cfg['state_resolution'])
@@ -295,7 +307,7 @@ Examples:
 
     print("\nBuilding GridInput cache for:")
     print(f"  System:      {args.system}")
-    print(f"  Input:       {args.input}")
+    print(f"  Input:       {input_name}")
     print(f"  Input type:  {getattr(input_instance, 'type', 'any')}")
     print(f"  State res:   {cfg['state_resolution']}")
     if time_grid_points is None:
@@ -315,7 +327,7 @@ Examples:
         'description': description,
         'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         'system_name': args.system,
-        'input_name': args.input,
+        'input_name': input_name,
         'input_type': getattr(input_instance, 'type', 'any'),
         # Grid tensors (CPU)
         'state_grid_points': [t.cpu() for t in state_grid_points],
@@ -327,7 +339,7 @@ Examples:
             'description': description,
             'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'system': args.system,
-            'input': args.input,
+            'input': input_name,
             'input_type': getattr(input_instance, 'type', 'any'),
             'grid_shape': list(grid_cache.shape),
         }

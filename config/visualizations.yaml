@@ -31,9 +31,9 @@ RoverDark:
           title: "Position (x,y) at heading=0"
         - dims: [0, 2]  # x vs heading
           fixed: {1: 0.0}  # y = 0
-          times: [0.0]
+          times: [1.5]
           title: "Position x vs Heading at y=0"
         - dims: [1, 2]  # y vs heading
           fixed: {0: 0.0}  # x = 0
-          times: [0.0]
+          times: [1.5]
           title: "Position y vs Heading at x=0"

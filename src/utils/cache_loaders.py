@@ -77,6 +77,8 @@ def load_grid_input_by_tag(tag: str, system: System, *, interpolate: bool = True
         interpolate=interpolate,
     )
     gi.bind(system)
+    if data.get("input_type"):
+        gi.type = data["input_type"]
     return gi
 
 
@@ -221,6 +223,9 @@ def load_nn_input_by_tag(tag: str, system: System, *, device: Optional[torch.dev
     base = Path(".cache") / "nn_inputs" / tag
     nn = NNInput(str(base), device=str(device) if device else None)
     nn.bind(system)
+    meta = get_nn_input_metadata(tag)
+    if meta.get("input_type"):
+        nn.type = meta["input_type"]
     return nn
 
 

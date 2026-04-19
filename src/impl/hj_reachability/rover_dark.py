@@ -26,6 +26,8 @@ class RuntimeRoverDark(HJReachabilityDynamics):
         direction = -grad_t.reshape(-1, grad_t.shape[-1])[:, 2:3]  # dV/dtheta
         control_set = self.control.given_set.to(state_t.device)
         _, xhat = control_set.argmax_support_with_state_est(direction, flat_state, float(time))
+        if xhat is None:
+            return torch.zeros_like(state_t)
         return (xhat.reshape_as(flat_state) - flat_state).reshape_as(state_t)
 
 

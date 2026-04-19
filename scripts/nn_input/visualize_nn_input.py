@@ -332,12 +332,12 @@ def main():
 
             for tval in times:
                 print(f"  Slice {idx+1}: dims={dims}, fixed={fixed}, t={tval}")
+                fixed_str = '_'.join([f"{k}{v}" for k, v in sorted(fixed.items())])
                 fig = visualize_2d_slice(nn_input, system, tval, dim1=dims[0], dim2=dims[1], fixed_dims=fixed, vis_resolution=vis_resolution, ref_grid=ref_grid)
                 if title_prefix:
                     current_title = fig._suptitle.get_text() if fig._suptitle else ''
                     fig.suptitle(f"{title_prefix}\n{current_title}", fontsize=12)
                 figs.append(fig)
-                fixed_str = '_'.join([f"{k}{v}" for k, v in sorted(fixed.items())])
                 fname = f"{system_name}_{input_name}_{args.preset}_slice{idx}_dims{''.join(map(str, dims))}"
                 if fixed_str:
                     fname += f"_fix{fixed_str}"
