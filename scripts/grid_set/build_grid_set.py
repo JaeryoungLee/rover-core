@@ -400,13 +400,25 @@ def _compute_uncertainty_bounds(system, states: torch.Tensor, time_val: float) -
 def build_grid_set(system_name: str, grid_input_tag: str, set_type: str, tag: str, description: str = "",
                    *, config_path: str = 'config/resolutions.yaml',
                    time_resolution: Optional[int] = None, workers: Optional[int] = -1,
-                   force: bool = False, checkpoint_every: int = 10) -> bool:
+                   force: bool = False, checkpoint_every: int = 10,
+                   uncertainty_preset: Optional[str] = None) -> bool:
     # Validate system
     try:
         system = instantiate_system_by_name(system_name)
     except Exception as e:
         print(f"Error: System '{system_name}' not found or failed to instantiate: {e}")
         return False
+
+    if uncertainty_preset is not None:
+        presets = getattr(system, 'uncertainty_presets', None)
+        if presets is None:
+            print(f"Error: System '{system_name}' has no uncertainty_presets defined.")
+            return False
+        if uncertainty_preset not in presets:
+            print(f"Error: Unknown preset '{uncertainty_preset}'. Available: {list(presets.keys())}")
+            return False
+        system.terminal_uncertainty_limits = presets[uncertainty_preset]
+        print(f"Uncertainty preset '{uncertainty_preset}': {system.terminal_uncertainty_limits}")
     if set_type not in ('box', 'hull'):
         print("Error: --set-type must be 'box' or 'hull'")
         return False
@@ -819,6 +831,8 @@ Examples:
     parser.add_argument('--time-resolution', type=int, default=None, help='Override time resolution (convenience for --set time_resolution=X)')
     parser.add_argument('--workers', type=int, default=-1, help='Worker processes (convenience for --set workers=X)')
     parser.add_argument('--checkpoint-every', type=int, default=10, help='Checkpoint frequency (convenience for --set checkpoint_every=X)')
+    parser.add_argument('--uncertainty-preset', type=str, default=None,
+                        metavar='PRESET', help='Named uncertainty preset (e.g. zero, small, moderate, harsh)')
     
     args = parser.parse_args()
     
@@ -856,6 +870,7 @@ Examples:
         workers=cfg.get('workers', -1),
         force=args.force,
         checkpoint_every=cfg.get('checkpoint_every', 10),
+        uncertainty_preset=args.uncertainty_preset,
     )
     sys.exit(0 if success else 1)
 

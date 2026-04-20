@@ -335,6 +335,9 @@ def visualize_simulation(
     dpi: int = 150,
     xlim: Optional[tuple[float, float]] = None,
     ylim: Optional[tuple[float, float]] = None,
+    value_tag: Optional[str] = None,
+    value_time: float = 0.0,
+    reach_avoid: bool = False,
 ):
     """Generate video from saved simulation results.
     
@@ -412,16 +415,36 @@ def visualize_simulation(
         pass
     for res in results:
         renderer.add(res)
-    # Thinner trajectory lines (after artists are created at add time)
+
+    # Pre-compute per-trajectory colors from value function if provided
+    traj_colors = []
+    if value_tag is not None:
+        try:
+            gv = load_grid_value_by_tag(value_tag, interpolate=True)
+            init_states_tensor = torch.as_tensor(
+                data['initial_states'] if isinstance(data['initial_states'], torch.Tensor)
+                else np.asarray(data['initial_states']),
+                dtype=torch.float32,
+            )
+            with torch.no_grad():
+                v_init = gv.value(init_states_tensor, value_time)
+            for v in v_init:
+                safe = float(v.item()) < 0.0 if reach_avoid else float(v.item()) > 0.0
+                traj_colors.append('tab:blue' if safe else 'tab:red')
+        except Exception as exc:
+            print(f"Warning: could not compute value colors: {exc}")
+
+    # Apply trajectory colors and line styles
     try:
-        for entry in getattr(renderer, '_trajectories', []):
+        for i, entry in enumerate(getattr(renderer, '_trajectories', [])):
             arts = entry.get('artists') if isinstance(entry, dict) else None
             if isinstance(arts, dict):
+                color = traj_colors[i] if i < len(traj_colors) else COLLISION_BLUE
                 if 'line' in arts and arts['line'] is not None:
-                    arts['line'].set_color(COLLISION_BLUE)
+                    arts['line'].set_color(color)
                     arts['line'].set_linewidth(1.2)
                 if 'est_line' in arts and arts['est_line'] is not None:
-                    arts['est_line'].set_color(COLLISION_BLUE)
+                    arts['est_line'].set_color(color)
                     arts['est_line'].set_linewidth(1.0)
                     arts['est_line'].set_linestyle(':')
     except Exception:
@@ -474,6 +497,61 @@ def visualize_simulation(
             renderer.fig.subplots_adjust(right=0.68)
     except Exception:
         pass
+
+    # Animated zero-level set + optional static ghost contours
+    if value_tag is not None:
+        try:
+            gv = load_grid_value_by_tag(value_tag, interpolate=True)
+            axes_vecs = gv.metadata.get('grid_coordinate_vectors')
+            if axes_vecs and len(axes_vecs) >= 2:
+                x_vec = np.asarray(axes_vecs[0])
+                y_vec = np.asarray(axes_vecs[1])
+                X, Y = np.meshgrid(x_vec, y_vec, indexing='ij')
+                state_dim = int(system.state_dim)
+                mids = [float(np.asarray(a)[len(np.asarray(a)) // 2]) for a in axes_vecs]
+                base = torch.as_tensor(mids[:state_dim], dtype=torch.float32)
+                pts = base.repeat(X.size, 1)
+                pts[:, 0] = torch.as_tensor(X.reshape(-1), dtype=torch.float32)
+                pts[:, 1] = torch.as_tensor(Y.reshape(-1), dtype=torch.float32)
+                grid_shape = (X.shape[0], X.shape[1])
+                time_horizon = float(gv.metadata.get('time_horizon', dt * steps))
+
+                # Static ghost contours: 4 evenly spaced snapshots across [0, T]
+                n_ghosts = 4
+                ghost_times = np.linspace(0.0, time_horizon, n_ghosts + 2)[0:-1]  # exclude endpoints
+                for i, t_static in enumerate(ghost_times):
+                    alpha = 0.2 + 0.3 * (i / max(n_ghosts - 1, 1))
+                    with torch.no_grad():
+                        V_s = gv.value(pts, float(t_static)).reshape(grid_shape).cpu().numpy()
+                    cs = renderer.ax.contour(X, Y, V_s, levels=[0.0],
+                                             colors=['dimgrey'], linewidths=0.8,
+                                             linestyles='--', alpha=alpha)
+                    renderer.ax.clabel(cs, fmt=f't={t_static:.1f}s', fontsize=7, inline=True)
+
+                # Patch _update to redraw animated contour each frame
+                original_update = renderer._update
+                contour_ref = {'cs': None}
+
+                def _make_patched(orig, gv_ref, pts_ref, grid_shape_ref, dt_ref, horizon_ref):
+                    def patched_update(frame):
+                        result = orig(frame)
+                        if contour_ref['cs'] is not None:
+                            try:
+                                contour_ref['cs'].remove()
+                            except Exception:
+                                pass
+                            contour_ref['cs'] = None
+                        t_cur = min(frame * dt_ref, horizon_ref)
+                        with torch.no_grad():
+                            V_t = gv_ref.value(pts_ref, t_cur).reshape(grid_shape_ref).cpu().numpy()
+                        contour_ref['cs'] = renderer.ax.contour(X, Y, V_t, levels=[0.0],
+                                                                 colors='grey', linewidths=2.0, alpha=0.85)
+                        return result
+                    return patched_update
+
+                renderer._update = _make_patched(original_update, gv, pts, grid_shape, dt, time_horizon)
+        except Exception as exc:
+            print(f"Warning: could not set up animated zero-level contour: {exc}")
 
     # Save video at real-time FPS
     if not no_video:
@@ -544,7 +622,30 @@ def visualize_simulation(
         print(f"\n✓ Visualization complete (video generation skipped)")
 
 
-def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color: bool = False, hide_est: bool = False, dpi: int = 150, xlim: Optional[tuple[float, float]] = None, ylim: Optional[tuple[float, float]] = None, value_tag: Optional[str] = None, value_time: float = 0.0) -> None:
+def _overlay_zero_level(ax, system, value_tag: str, value_time: float) -> None:
+    """Draw the zero-level contour of a GridValue onto ax (xy-plane, other dims at midpoint)."""
+    try:
+        gv = load_grid_value_by_tag(value_tag, interpolate=True)
+        axes_vecs = gv.metadata.get('grid_coordinate_vectors')
+        if not axes_vecs or len(axes_vecs) < 2:
+            return
+        x = np.asarray(axes_vecs[0])
+        y = np.asarray(axes_vecs[1])
+        X, Y = np.meshgrid(x, y, indexing='ij')
+        state_dim = int(system.state_dim)
+        mids = [float(np.asarray(a)[len(np.asarray(a)) // 2]) for a in axes_vecs]
+        base = torch.as_tensor(mids[:state_dim], dtype=torch.float32)
+        pts = base.repeat(X.size, 1)
+        pts[:, 0] = torch.as_tensor(X.reshape(-1), dtype=torch.float32)
+        pts[:, 1] = torch.as_tensor(Y.reshape(-1), dtype=torch.float32)
+        with torch.no_grad():
+            V = gv.value(pts, value_time).reshape(X.shape[0], X.shape[1]).cpu().numpy()
+        ax.contour(X, Y, V, levels=[0.0], colors='k', linewidths=2)
+    except Exception as exc:
+        print(f"Warning: could not overlay value zero-level set: {exc}")
+
+
+def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color: bool = False, hide_est: bool = False, dpi: int = 150, xlim: Optional[tuple[float, float]] = None, ylim: Optional[tuple[float, float]] = None, value_tag: Optional[str] = None, value_time: float = 0.0, reach_avoid: bool = False) -> None:
     """Quickly render and save only the final frame to a PNG.
 
     Uses SimulationRenderer to render all trajectories at the last time step.
@@ -609,7 +710,8 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
             with torch.no_grad():
                 v_init = gv.value(init_states_tensor, value_time)  # [N]
             for v in v_init:
-                traj_colors.append('tab:blue' if float(v.item()) > 0.0 else 'tab:red')
+                safe = float(v.item()) < 0.0 if reach_avoid else float(v.item()) > 0.0
+                traj_colors.append('tab:blue' if safe else 'tab:red')
         except Exception as exc:
             print(f"Warning: could not compute BRT colors: {exc}")
 
@@ -713,24 +815,7 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
         pass
     # Overlay value function zero-level set if requested
     if value_tag is not None:
-        try:
-            gv = load_grid_value_by_tag(value_tag, interpolate=True)
-            axes_vecs = gv.metadata.get('grid_coordinate_vectors')
-            if axes_vecs and len(axes_vecs) >= 2:
-                x = np.asarray(axes_vecs[0])
-                y = np.asarray(axes_vecs[1])
-                X, Y = np.meshgrid(x, y, indexing='ij')
-                state_dim = int(system.state_dim)
-                mids = [float(np.asarray(a)[len(np.asarray(a)) // 2]) for a in axes_vecs]
-                base = torch.as_tensor(mids[:state_dim], dtype=torch.float32)
-                pts = base.repeat(X.size, 1)
-                pts[:, 0] = torch.as_tensor(X.reshape(-1), dtype=torch.float32)
-                pts[:, 1] = torch.as_tensor(Y.reshape(-1), dtype=torch.float32)
-                with torch.no_grad():
-                    V = gv.value(pts, value_time).reshape(X.shape[0], X.shape[1]).cpu().numpy()
-                renderer.ax.contour(X, Y, V, levels=[0.0], colors='k', linewidths=2)
-        except Exception as exc:
-            print(f"Warning: could not overlay value zero-level set: {exc}")
+        _overlay_zero_level(renderer.ax, system, value_tag, value_time)
 
     out_dir = Path('outputs') / 'simulations' / tag
     final_path = out_dir / out_name
@@ -1091,12 +1176,14 @@ def main():
     parser.add_argument('--value-tag', type=str, default=None, help='Cache tag for the value (required for GridValue)')
     parser.add_argument('--value-time', type=float, default=0.0, help='Time at which to evaluate the value (default: 0.0)')
     parser.add_argument('--value-zero-level', action='store_true', help='Plot the zero-level set of the chosen value')
+    parser.add_argument('--reach-avoid', action='store_true', dest='reach_avoid',
+                        help='Use reach-avoid color convention: blue=V<0 (safe/reaches goal), red=V>=0 (unsafe)')
     # min-failure is now automatic for grid simulations; flag removed
     
     args = parser.parse_args()
     
     if args.save_final_frame:
-        save_final_frame(tag=args.tag, same_color=args.same_color, hide_est=args.hide_est, dpi=args.dpi, xlim=tuple(args.xlim) if args.xlim else None, ylim=tuple(args.ylim) if args.ylim else None, value_tag=args.value_tag, value_time=args.value_time)
+        save_final_frame(tag=args.tag, same_color=args.same_color, hide_est=args.hide_est, dpi=args.dpi, xlim=tuple(args.xlim) if args.xlim else None, ylim=tuple(args.ylim) if args.ylim else None, value_tag=args.value_tag, value_time=args.value_time, reach_avoid=args.reach_avoid)
         return
     elif args.value_zero_level and args.value:
         visualize_value_zero_level(tag=args.tag, value_name=args.value, value_tag=args.value_tag, value_time=args.value_time, dpi=args.dpi, xlim=tuple(args.xlim) if args.xlim else None, ylim=tuple(args.ylim) if args.ylim else None)
@@ -1124,6 +1211,9 @@ def main():
                     dpi=args.dpi,
                     xlim=tuple(args.xlim) if args.xlim else None,
                     ylim=tuple(args.ylim) if args.ylim else None,
+                    value_tag=args.value_tag,
+                    value_time=args.value_time,
+                    reach_avoid=args.reach_avoid,
                 )
 
 

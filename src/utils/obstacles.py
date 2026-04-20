@@ -147,3 +147,31 @@ def draw_obstacles_2d(ax, system, *, zorder: int = 100) -> None:
                 zorder=zorder,
             )
             ax.add_patch(rect)
+
+
+def draw_goal_2d(ax, system, *, zorder: int = 10) -> None:
+    """Draw the goal region from a system onto a matplotlib axis.
+
+    Renders as a green translucent circle if system has goal_state and goal_radius.
+    Safe to call even if system has no goal attributes.
+    """
+    import matplotlib.pyplot as plt
+
+    if not hasattr(system, 'goal_state') or not hasattr(system, 'goal_radius'):
+        return
+
+    goal = system.goal_state
+    gx = float(goal[0].item() if hasattr(goal[0], 'item') else goal[0])
+    gy = float(goal[1].item() if hasattr(goal[1], 'item') else goal[1])
+    radius = float(system.goal_radius)
+
+    circ = plt.Circle(
+        (gx, gy),
+        radius,
+        facecolor=(0.0, 0.8, 0.0, 0.25),
+        edgecolor='green',
+        linewidth=1.5,
+        linestyle='--',
+        zorder=zorder,
+    )
+    ax.add_patch(circ)

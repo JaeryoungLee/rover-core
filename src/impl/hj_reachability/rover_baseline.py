@@ -11,7 +11,8 @@ from ..sets.jax_grid_set import JaxGridSet
 from ..systems.rover_baseline import RoverBaseline as RoverBaselineSystem
 from .base import HJSolverDynamics
 
-__all__ = ["RoverBaseline", "RoverBaselineNominal", "RuntimeRoverBaseline"]
+__all__ = ["RoverBaseline", "RoverBaselineNominal", "RuntimeRoverBaseline",
+           "RoverBaselineReachAvoid"]
 
 
 class RuntimeRoverBaseline(HJReachabilityDynamics):
@@ -91,9 +92,12 @@ class RoverBaseline(_RoverBaselineBase):
     - The agent computes control ω from estimated state x̂ (stored in GridSet)
     - State estimation error e = x̂ - x acts as the adversarial disturbance
 
-    Uses time-invariant uncertainty bounds matching RoverBaseline system:
-    ε = (±0.5 m, ±0.5 m, ±0.1 rad).
+    _adversary_sign controls the optimization direction:
+      -1  (default): adversary minimizes H → obstacle BRT (V < 0 = unsafe)
+      +1  (reach-avoid subclass): adversary maximizes H → reach-avoid (V < 0 = safe)
     """
+
+    _adversary_sign: int = -1  # obstacle BRT: minimize H to expand unsafe set
 
     @classmethod
     def runtime_class(cls) -> type:
@@ -112,18 +116,16 @@ class RoverBaseline(_RoverBaselineBase):
         return lower_ctrl[0], upper_ctrl[0]
 
     def hamiltonian(self, state: jnp.ndarray, time: float, value: jnp.ndarray, grad_value: jnp.ndarray) -> jnp.ndarray:
-        """Compute the Hamiltonian for worst-case uncertainty problem.
+        """Compute the Hamiltonian.
 
-        For worst-case control (min over control set), we want H = min_u ∇V · f(x, u).
-        This is equivalent to argmax in direction [-dVdtheta] to minimize the dot product.
+        Adversary picks omega to argmax(_adversary_sign * dVdtheta * omega):
+          _adversary_sign = -1: minimizes H (obstacle BRT)
+          _adversary_sign = +1: maximizes H (reach-avoid)
         """
         dVdx, dVdy, dVdtheta = grad_value[0], grad_value[1], grad_value[2]
         theta = state[2]
-
-        # For worst-case control: minimize H = ∇V · f = dVdtheta * omega
-        optimal_omega = self.jax_grid_set.argmax_support(jnp.array([-dVdtheta]), state, time)[0]
-
-        # H = ∇V · f
+        optimal_omega = self.jax_grid_set.argmax_support(
+            jnp.array([self._adversary_sign * dVdtheta]), state, time)[0]
         return dVdx * self._v * jnp.cos(theta) + dVdy * self._v * jnp.sin(theta) + dVdtheta * optimal_omega
 
     # -------------------- HJReachabilityDynamics binding interface --------------------
@@ -134,7 +136,7 @@ class RoverBaseline(_RoverBaselineBase):
 
     # -------------------- Optimal channel extraction --------------------
     def optimal_uncertainty_from_grad(self, state, time, grad_value):
-        """Return the state-estimation error that induces the worst-case control."""
+        """Return the state-estimation error that optimizes H in the adversary's direction."""
         if not hasattr(self, "jax_grid_set"):
             raise RuntimeError("Control set must be bound before extracting optimal uncertainty.")
 
@@ -156,15 +158,10 @@ class RoverBaseline(_RoverBaselineBase):
         if grad_flat.shape[-1] < 3:
             raise ValueError("Gradient must include heading derivative to recover uncertainty.")
 
-        direction = -grad_flat[:, 2:3]  # adversary pushes against dV/dtheta
-
-        state_jnp = jnp.asarray(state_flat)
-        dir_jnp = jnp.asarray(direction)
+        direction = self._adversary_sign * grad_flat[:, 2:3]
 
         best_u, best_xhat, has_state = self.jax_grid_set.argmax_support_with_state_est(
-            dir_jnp,
-            state_jnp,
-            float(time),
+            jnp.asarray(direction), jnp.asarray(state_flat), float(time),
         )
 
         best_xhat = np.asarray(best_xhat)
@@ -184,6 +181,12 @@ class RoverBaseline(_RoverBaselineBase):
                 uncertainty[mask] = diffs[mask]
 
         return uncertainty.reshape(original_shape)
+
+
+class RoverBaselineReachAvoid(RoverBaseline):
+    """Reach-avoid variant: adversary maximizes H so V < 0 = safe (can reach goal)."""
+
+    _adversary_sign: int = +1
 
 
 class RoverBaselineNominal(_RoverBaselineBase):

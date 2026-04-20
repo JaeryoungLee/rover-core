@@ -97,64 +97,70 @@ def _require_keys(d: dict, keys):
     return d
 
 
+def _evaluate_fn_on_grid(grid: Any, system: System, fn_name: str) -> np.ndarray:
+    """Evaluate a scalar system function over all grid states (batched)."""
+    use_gpu = getattr(system, '_use_gpu', False)
+    batch_size = getattr(system, '_batch_size', 10000)
+    device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+
+    states_flat = np.array(grid.states).reshape(-1, grid.states.shape[-1])
+    vals: list[np.ndarray] = []
+    for i in range(0, states_flat.shape[0], batch_size):
+        batch_t = torch.from_numpy(states_flat[i:i + batch_size]).float().to(device)
+        with torch.no_grad():
+            v_t = getattr(system, fn_name)(batch_t, 0.0)
+        vals.append(v_t.detach().cpu().numpy())
+    return np.concatenate(vals, axis=0).reshape(tuple(int(s) for s in grid.states.shape[:-1]))
+
+
 def compute_initial_values(
     grid: Any,
-    system: System
+    system: System,
+    reach_avoid: bool = False,
 ) -> jnp.ndarray:
-    """Compute initial values using the system's public failure_function.
+    """Compute initial values for the HJ reachability PDE.
 
-    The failure_function should return a signed value per state (negative in failure/obstacle region),
-    matching the semantics expected by HJ reachability initial conditions.
-    
+    - Obstacle BRT: uses failure_function (negative inside obstacle).
+    - Reach-avoid:  uses target_function (negative inside goal region).
+
     Args:
         grid: HJ reachability grid
         system: System instance
+        reach_avoid: If True, use target_function instead of failure_function
     """
-    
-    # Pull computational settings from system
     use_gpu = getattr(system, '_use_gpu', False)
     batch_size = getattr(system, '_batch_size', 10000)
     cuda_available = torch.cuda.is_available()
     device = 'cuda' if use_gpu and cuda_available else 'cpu'
 
-    print("\nComputing initial values via system.failure_function ...")
-    
-    # Log attribute sources
+    fn_name = 'target_function' if reach_avoid else 'failure_function'
+    print(f"\nComputing initial values via system.{fn_name} ...")
+
     if hasattr(system, '_use_gpu'):
         print(f"  use_gpu={use_gpu} (from System._use_gpu attribute)")
     else:
         print(f"  use_gpu={use_gpu} (using default, System has no _use_gpu attribute)")
-    
+
     if hasattr(system, '_batch_size'):
         print(f"  batch_size={batch_size} (from System._batch_size attribute)")
     else:
         print(f"  batch_size={batch_size} (using default, System has no _batch_size attribute)")
-    
+
     if use_gpu and not cuda_available:
         print(f"  Device: {device} (CUDA not available, falling back to cpu)")
     else:
         print(f"  Device: {device}")
 
-    # Flatten grid states for batched evaluation
-    states_flat = np.array(grid.states).reshape(-1, grid.states.shape[-1])
-
-    vals: list[np.ndarray] = []
-    for i in range(0, states_flat.shape[0], batch_size):
-        batch_np = states_flat[i:i + batch_size]
-        batch_t = torch.from_numpy(batch_np).float().to(device)
-        print(f'Assuming a time-invariant failure function...')
-        with torch.no_grad():
-            v_t = system.failure_function(batch_t, 0.0)
-        vals.append(v_t.detach().cpu().numpy())
-
-    sdf_flat = np.concatenate(vals, axis=0)
-    sdf_grid = sdf_flat.reshape(tuple(int(s) for s in grid.states.shape[:-1]))
+    sdf_grid = _evaluate_fn_on_grid(grid, system, fn_name)
 
     print("✓ Initial values computed")
     try:
         print(f"  Min: {float(np.min(sdf_grid)):.3f}")
         print(f"  Max: {float(np.max(sdf_grid)):.3f}")
-        print(f"  Failure fraction: {float((sdf_grid < 0).mean()):.2%}")
+        if reach_avoid:
+            print(f"  Goal fraction: {float((sdf_grid < 0).mean()):.2%}")
+        else:
+            print(f"  Failure fraction: {float((sdf_grid < 0).mean()):.2%}")
     except Exception:
         pass
 
@@ -168,40 +174,69 @@ def solve_hj_reachability(
     time_horizon: float,
     time_steps: int,
     accuracy: str = 'very_high',
-    progress_bar: bool = True
+    progress_bar: bool = True,
+    reach_avoid: bool = False,
+    obstacle_values: Optional[np.ndarray] = None,
+    target_values: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Solve HJ reachability PDE and compute gradients.
-    
+
+    Reach-avoid tube formulation (eq 2.76 in Bansal et al.):
+      max{ min{ D_t V + H,  l(x) - V },  -g(x) - V } = 0
+      V(T,x) = max{ l(x), -g(T,x) }
+
+    Implemented via two value postprocessors applied each step:
+      V = min( max(V, -g(x)),  l(x) )
+        max(V, -g): obstacle states frozen as unsafe (V >= -g > 0 inside obstacle)
+        min(V,  l): target absorbing — once V reaches l(x), it stays there
+
+    Args:
+        reach_avoid: If True, use reach-avoid tube formulation.
+        obstacle_values: Grid array of failure_function (g(x)), required when reach_avoid=True.
+        target_values: Grid array of target_function (l(x)), required when reach_avoid=True.
+
     Returns:
         values: Value function array [time_steps, *grid_shape]
         times: Time array [time_steps]
         gradients: Gradient array [time_steps, *grid_shape, state_dim]
     """
-    
-    print(f"\nSolving HJ Reachability:")
+
+    print(f"\nSolving HJ Reachability ({'reach-avoid tube' if reach_avoid else 'obstacle BRT'}):")
     print(f"  Time horizon: {time_horizon:.2f} s")
     print(f"  Time steps: {time_steps}")
     print(f"  Grid shape: {grid.states.shape[:-1]}")
     print(f"  Accuracy: {accuracy}")
-    
+
     # Time vector (backwards from time_horizon to 0)
     times = np.linspace(time_horizon, 0, time_steps)
-    
-    # Solver settings
-    # Use more stable dissipation (LLF) and a slightly smaller CFL to reduce NaN risk
+
+    if reach_avoid:
+        if obstacle_values is None or target_values is None:
+            raise ValueError("obstacle_values and target_values are required when reach_avoid=True")
+
+        # Fix initial condition: V(T,x) = max{ l(x), -g(T,x) }  (eq 2.75/2.77)
+        obs_jnp = -jnp.array(obstacle_values)   # positive inside obstacle
+        tgt_jnp = jnp.array(target_values)       # l(x): negative inside goal
+        initial_values = jnp.maximum(initial_values, obs_jnp)
+
+        # Two postprocessors combined (eq 2.76):
+        #   max(V, -g): obstacle states stay unsafe
+        #   min(V,  l): target is absorbing — V frozen at l(x) once reached
+        hamiltonian_postprocessor = hj.solver.identity
+        value_postprocessor = lambda t, v: jnp.minimum(jnp.maximum(v, obs_jnp), tgt_jnp)
+    else:
+        hamiltonian_postprocessor = hj.solver.backwards_reachable_tube
+        value_postprocessor = (lambda t, v: jnp.clip(v, jnp.min(initial_values), None))
+
     solver_settings = hj.SolverSettings.with_accuracy(
         accuracy,
-        # For safety/BRT, limit Hamiltonian to non-positive to avoid expansion past target
-        hamiltonian_postprocessor=hj.solver.backwards_reachable_tube,
-        # Bound value function: lower bound by min of initial values, upper bound by initial value at current state
-        # This ensures V(t,x) stays in [min(V0), V0(x)] which is physically correct for BRT
-        value_postprocessor=(lambda t, v: jnp.clip(v, jnp.min(initial_values), None)),
+        hamiltonian_postprocessor=hamiltonian_postprocessor,
+        value_postprocessor=value_postprocessor,
     )
-    # Prefer local Lax-Friedrichs for tighter, state-dependent dissipation
     solver_settings = solver_settings.replace(
         artificial_dissipation_scheme=hj.artificial_dissipation.local_lax_friedrichs,
-        CFL_number=0.75,  # default (can change to trade off speed and stability)
+        CFL_number=0.75,
     )
     
     # Solve!
@@ -252,6 +287,7 @@ def build_value_function(
     accuracy: str = 'very_high',
     config_path: str = 'config/resolutions.yaml',
     progress_bar: bool = True,
+    reach_avoid: bool = False,
 ) -> GridValue:
     """
     Build GridValue for a system-controller pair.
@@ -454,20 +490,24 @@ def build_value_function(
     )
     
     # Step 5: Compute initial values
-    # Compute initial values
-    
-    initial_values = compute_initial_values(grid, system)
-    
-    # Step 6: Solve HJ reachability
-    # Solve HJ reachability
+    initial_values = compute_initial_values(grid, system, reach_avoid=reach_avoid)
 
-    # Enforce GPU usage if available
+    obstacle_values = None
+    target_values = None
+    if reach_avoid:
+        print("\nComputing obstacle values (g(x)) for reach-avoid constraint ...")
+        obstacle_values = np.array(_evaluate_fn_on_grid(grid, system, 'failure_function'))
+        print(f"✓ Obstacle values computed (obstacle fraction: {float((obstacle_values < 0).mean()):.2%})")
+        # target_values = l(x), same as initial_values (already computed above)
+        target_values = np.array(initial_values)
+
+    # Step 6: Solve HJ reachability
     gpu_devices = jax.devices("gpu")
     if gpu_devices:
         print(f"✓ Using GPU: {gpu_devices[0]}")
     else:
         print("⚠ No GPU detected by JAX; running on CPU may be slow.")
-    
+
     values, times, gradients = solve_hj_reachability(
         dynamics,
         grid,
@@ -475,7 +515,10 @@ def build_value_function(
         time_horizon,
         time_steps,
         accuracy,
-        progress_bar
+        progress_bar,
+        reach_avoid=reach_avoid,
+        obstacle_values=obstacle_values,
+        target_values=target_values,
     )
     
     # Step 7: Create and save GridValue
@@ -513,6 +556,7 @@ def build_value_function(
         ],
         'dynamics_name': dynamics_name,
         'bindings': bindings,
+        'reach_avoid': reach_avoid,
     }
     
     # Convert to ascending time for persistence and usage:
@@ -649,6 +693,8 @@ Examples:
     parser.add_argument('--time-steps', type=int, help='Number of time steps')
     parser.add_argument('--accuracy', type=str, default='very_high', choices=['low', 'medium', 'high', 'very_high'], help='Solver accuracy')
     parser.add_argument('--no-progress', action='store_true', help='Disable solver progress bar')
+    parser.add_argument('--reach-avoid', action='store_true', dest='reach_avoid',
+                        help='Use reach-avoid formulation (target_function as initial values, obstacle constraint as value postprocessor)')
     
     args = parser.parse_args()
     
@@ -741,6 +787,7 @@ Examples:
         accuracy=args.accuracy,
         config_path=args.config,
         progress_bar=not args.no_progress,
+        reach_avoid=args.reach_avoid,
     )
 
 

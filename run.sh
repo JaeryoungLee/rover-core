@@ -1,14 +1,15 @@
 SYSTEM=RoverBaseline   # RoverDark | RoverBaseline
 # SYSTEM=RoverDark   # RoverDark | RoverBaseline
 
-CONTROLLER=MPC #MPC | MPC_NN
+CONTROLLER=ParamMPC #MPC | MPC_NN
+# CONTROLLER=MPC #MPC | MPC_NN
 # CONTROLLER=NN #MPC | MPC_NN
 
 
 # MPC
 
 # === Stage 1: Build GridInput (MPC control evaluated on state grid) [~7 minutes]
-# python scripts/grid_input/build_grid_input.py --system $SYSTEM --input ${SYSTEM}_${CONTROLLER} --tag ${SYSTEM}_${CONTROLLER}
+python scripts/grid_input/build_grid_input.py --system $SYSTEM --input ${SYSTEM}_${CONTROLLER} --tag ${SYSTEM}_${CONTROLLER}
 # python scripts/grid_input/visualize_grid_input.py --tag ${SYSTEM}_${CONTROLLER}
 
 # === Stage 2: Build GridSet (control sets capturing uncertainty) [~30 minutes]
@@ -28,7 +29,7 @@ CONTROLLER=MPC #MPC | MPC_NN
 
 
 # ====== Stage 3: Build GridValue (BRT for worst-case estimation error) [<1 minute]
-# python scripts/grid_value/build_grid_value.py --dynamics $SYSTEM --control-grid-set-tag ${SYSTEM}_MPC_NN_Box_Clamped --tag ${SYSTEM}_${CONTROLLER}_WorstCase --force
+# python scripts/grid_value/build_grid_value.py --dynamics $SYSTEM --control-grid-set-tag ${SYSTEM}_${CONTROLLER}_Box --tag ${SYSTEM}_${CONTROLLER}_WorstCase --force
 # python scripts/grid_value/visualize_grid_value.py --tag ${SYSTEM}_${CONTROLLER}_WorstCase
 
 
@@ -38,6 +39,10 @@ CONTROLLER=MPC #MPC | MPC_NN
 # python scripts/simulation/visualize_simulation.py --tag ${SYSTEM}_${CONTROLLER}_sim --save-final-frame --value-tag ${SYSTEM}_${CONTROLLER}_WorstCase --value-time 0.0 --value-zero-level
 # python scripts/simulation/visualize_simulation.py --tag ${SYSTEM}_${CONTROLLER}_sim --force
 # python scripts/simulation/inspect_simulation.py --tag ${SYSTEM}_${CONTROLLER}_sim 
+
+
+
+
 
 
 # Nominal

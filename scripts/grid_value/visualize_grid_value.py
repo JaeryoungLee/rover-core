@@ -190,6 +190,8 @@ def visualize_value_slice_2d(
     # Format
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
+    ax.set_xlim(float(X.min()), float(X.max()))
+    ax.set_ylim(float(Y.min()), float(Y.max()))
     # Only set title in static mode
     if ax is None:
         if vf.state_dim > 2:
@@ -337,14 +339,17 @@ def visualize_2d_slices(
         # Zero level set (boundary of reachable set)
         ax.contour(X, Y, value_2d_np, levels=[0.0], colors='black', linewidths=2, linestyles='-')
         
-        # Add obstacles (if 2D spatial)
+        # Add obstacles and goal (if 2D spatial)
         if vf.state_dim >= 2 and slice_dim >= 2:
-            from src.utils.obstacles import draw_obstacles_2d
+            from src.utils.obstacles import draw_obstacles_2d, draw_goal_2d
             draw_obstacles_2d(ax, system, zorder=10)
+            draw_goal_2d(ax, system, zorder=10)
         
         # Format
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
+        ax.set_xlim(float(X.min()), float(X.max()))
+        ax.set_ylim(float(Y.min()), float(Y.max()))
         ax.set_title(f't = {float(vf._times[time_idx].item()):.2f}s')
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)

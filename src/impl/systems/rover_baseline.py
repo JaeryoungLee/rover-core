@@ -60,6 +60,13 @@ class RoverBaseline(RoverBase):
     )
     uncertainty_growth_rate: float = 0.0  # time-invariant
 
+    uncertainty_presets: dict = {
+        "zero":     (( 0.0,  0.0,  0.0 ), ( 0.0,  0.0,  0.0 )),
+        "small":    ((-0.2, -0.2, -0.04), ( 0.2,  0.2,  0.04)),
+        "moderate": ((-0.5, -0.5, -0.1 ), ( 0.5,  0.5,  0.1 )),
+        "harsh":    ((-0.8, -0.8, -0.2 ), ( 0.8,  0.8,  0.2 )),
+    }
+
     @property
     def time_invariant_uncertainty_limits(self) -> bool:
         """Always True — uncertainty is fixed for this system."""
@@ -69,6 +76,7 @@ class RoverBaseline(RoverBase):
         Circle2D(center=(16.0, 0.0), radius=1.0),
     )
     goal_state = torch.tensor([20.0, 0.0, 0.0], dtype=torch.float32)
+    goal_radius: float = 1.0
 
     _render_title = "RoverBaseline"
 
@@ -118,6 +126,12 @@ class RoverBaseline(RoverBase):
         dx = state[..., 0] - self.goal_state[0]
         dy = state[..., 1] - self.goal_state[1]
         return torch.hypot(dx, dy)
+
+    def target_function(self, state, time=None):
+        """Signed distance to goal region: negative inside, positive outside."""
+        dx = state[..., 0] - self.goal_state[0]
+        dy = state[..., 1] - self.goal_state[1]
+        return torch.hypot(dx, dy) - self.goal_radius
 
     # ------------------------------------------------------------------
     # Dynamics
