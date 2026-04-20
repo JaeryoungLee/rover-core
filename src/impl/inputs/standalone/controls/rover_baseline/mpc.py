@@ -138,7 +138,8 @@ class RoverBaseline_MPC(Input):
     dim = 1
     time_invariant = True
 
-    _use_gpu = False
+    # _use_gpu = False
+    _use_gpu = True
     _batch_size = 100000
 
     def __init__(

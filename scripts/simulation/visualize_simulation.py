@@ -544,7 +544,7 @@ def visualize_simulation(
         print(f"\n✓ Visualization complete (video generation skipped)")
 
 
-def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color: bool = False, hide_est: bool = False, dpi: int = 150, xlim: Optional[tuple[float, float]] = None, ylim: Optional[tuple[float, float]] = None) -> None:
+def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color: bool = False, hide_est: bool = False, dpi: int = 150, xlim: Optional[tuple[float, float]] = None, ylim: Optional[tuple[float, float]] = None, value_tag: Optional[str] = None, value_time: float = 0.0) -> None:
     """Quickly render and save only the final frame to a PNG.
 
     Uses SimulationRenderer to render all trajectories at the last time step.
@@ -596,18 +596,36 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
         res.times = times
         renderer.add(res)
 
+    # Pre-compute per-trajectory BRT color if value_tag provided
+    traj_colors = []
+    if value_tag is not None:
+        try:
+            gv = load_grid_value_by_tag(value_tag, interpolate=True)
+            init_states_tensor = torch.as_tensor(
+                data['initial_states'] if isinstance(data['initial_states'], torch.Tensor)
+                else np.asarray(data['initial_states']),
+                dtype=torch.float32,
+            )  # [N, state_dim]
+            with torch.no_grad():
+                v_init = gv.value(init_states_tensor, value_time)  # [N]
+            for v in v_init:
+                traj_colors.append('tab:blue' if float(v.item()) > 0.0 else 'tab:red')
+        except Exception as exc:
+            print(f"Warning: could not compute BRT colors: {exc}")
+
     # Initialize and update to final frame, then save
     renderer._init_animation()  # type: ignore[attr-defined]
     # Apply thinner lines after artists are initialized
     try:
-        for entry in getattr(renderer, '_trajectories', []):
+        for i, entry in enumerate(getattr(renderer, '_trajectories', [])):
             arts = entry.get('artists') if isinstance(entry, dict) else None
             if isinstance(arts, dict):
+                color = traj_colors[i] if i < len(traj_colors) else COLLISION_BLUE
                 if 'line' in arts and arts['line'] is not None:
-                    arts['line'].set_color(COLLISION_BLUE)
+                    arts['line'].set_color(color)
                     arts['line'].set_linewidth(1.2)
                 if 'est_line' in arts and arts['est_line'] is not None:
-                    arts['est_line'].set_color(COLLISION_BLUE)
+                    arts['est_line'].set_color(color)
                     arts['est_line'].set_linewidth(1.0)
                     arts['est_line'].set_linestyle(':')
     except Exception:
@@ -693,6 +711,27 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
             renderer.fig.subplots_adjust(right=0.68)
     except Exception:
         pass
+    # Overlay value function zero-level set if requested
+    if value_tag is not None:
+        try:
+            gv = load_grid_value_by_tag(value_tag, interpolate=True)
+            axes_vecs = gv.metadata.get('grid_coordinate_vectors')
+            if axes_vecs and len(axes_vecs) >= 2:
+                x = np.asarray(axes_vecs[0])
+                y = np.asarray(axes_vecs[1])
+                X, Y = np.meshgrid(x, y, indexing='ij')
+                state_dim = int(system.state_dim)
+                mids = [float(np.asarray(a)[len(np.asarray(a)) // 2]) for a in axes_vecs]
+                base = torch.as_tensor(mids[:state_dim], dtype=torch.float32)
+                pts = base.repeat(X.size, 1)
+                pts[:, 0] = torch.as_tensor(X.reshape(-1), dtype=torch.float32)
+                pts[:, 1] = torch.as_tensor(Y.reshape(-1), dtype=torch.float32)
+                with torch.no_grad():
+                    V = gv.value(pts, value_time).reshape(X.shape[0], X.shape[1]).cpu().numpy()
+                renderer.ax.contour(X, Y, V, levels=[0.0], colors='k', linewidths=2)
+        except Exception as exc:
+            print(f"Warning: could not overlay value zero-level set: {exc}")
+
     out_dir = Path('outputs') / 'simulations' / tag
     final_path = out_dir / out_name
     renderer.fig.savefig(final_path, dpi=dpi, bbox_inches='tight')
@@ -1057,7 +1096,7 @@ def main():
     args = parser.parse_args()
     
     if args.save_final_frame:
-        save_final_frame(tag=args.tag, same_color=args.same_color, hide_est=args.hide_est, dpi=args.dpi, xlim=tuple(args.xlim) if args.xlim else None, ylim=tuple(args.ylim) if args.ylim else None)
+        save_final_frame(tag=args.tag, same_color=args.same_color, hide_est=args.hide_est, dpi=args.dpi, xlim=tuple(args.xlim) if args.xlim else None, ylim=tuple(args.ylim) if args.ylim else None, value_tag=args.value_tag, value_time=args.value_time)
         return
     elif args.value_zero_level and args.value:
         visualize_value_zero_level(tag=args.tag, value_name=args.value, value_tag=args.value_tag, value_time=args.value_time, dpi=args.dpi, xlim=tuple(args.xlim) if args.xlim else None, ylim=tuple(args.ylim) if args.ylim else None)

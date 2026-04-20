@@ -50,8 +50,8 @@ class RoverBaseline(RoverBase):
     _batch_size = 100000
 
     # System parameters
-    v = 1.0  # constant speed (m/s)
-    time_horizon = 1.0  # s
+    v = 2.0  # constant speed (m/s)
+    time_horizon = 5.0  # s
 
     # Time-invariant uncertainty bounds (fixed, not scaled by time)
     terminal_uncertainty_limits: Tuple[Tuple[float, ...], Tuple[float, ...]] = (

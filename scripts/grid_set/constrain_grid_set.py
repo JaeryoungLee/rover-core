@@ -116,6 +116,11 @@ def clamp_grid_set_to_limits(grid_set_tag: str, out_tag: str, description: str =
         'box_lower': out_lower,
         'box_upper': out_upper,
     }
+    # Preserve state-estimate provenance so optimal_uncertainty_from_grad can recover xhat
+    for key in ('box_state_est_corner_idx', 'hull_state_idx_padded', 'hull_vertices',
+                'hull_padded', 'hull_mask'):
+        if key in src:
+            payload[key] = src[key]
 
     import pickle
     tmp = out_path.with_suffix('.pkl.tmp')
