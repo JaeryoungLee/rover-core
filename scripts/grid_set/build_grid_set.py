@@ -45,6 +45,7 @@ from src.utils.cache_loaders import (
 from src.utils.config import load_resolution_config
 from src.utils.grids import compute_strides
 from src.utils.registry import get_available_system_classes, list_grid_input_tags
+from src.utils.system_snapshot import snapshot_system
 
 # Module-level globals for worker processes (populated before forking workers)
 _W_SHAPE = None
@@ -770,6 +771,9 @@ def build_grid_set(system_name: str, grid_input_tag: str, set_type: str, tag: st
         'grid_shape': shape + (t_size,),
         'state_grid_points': state_grid_points,
         'time_grid_points': time_grid_points,
+        'system_config': snapshot_system(system),
+        'uncertainty_preset': uncertainty_preset,
+        'uncertainty_limits': list(getattr(system, 'terminal_uncertainty_limits', [])) or None,
     }
     if set_type == 'hull':
         payload['hull_vertices_padded'] = hull_vertices_padded

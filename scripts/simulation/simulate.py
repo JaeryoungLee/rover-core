@@ -38,6 +38,7 @@ from src.utils.cache_loaders import (
 )
 from src.core.systems import System
 from src.core.simulators import simulate_euler, simulate_discrete
+from src.utils.system_snapshot import snapshot_system
 
 
 def _list_caches_for_system(system_name: str, cache_type: str) -> List[str]:
@@ -245,6 +246,13 @@ Available config keys (see config/simulations.yaml for full documentation):
     parser.add_argument('--fix-initial-slice', type=str, action='append', metavar='DIM=VALUE',
                         help='Fix a state dimension to a constant value (e.g., --fix-initial-slice 3=0 to set s=0). Can be repeated.')
     parser.add_argument('--random-seed', type=int, default=None, help='Random seed for reproducibility')
+
+    # Parameter sweep: replicate each initial state K times, overriding one dim
+    parser.add_argument('--sweep-dim', type=int, default=None,
+                        help='State dimension to sweep (e.g. 3 for λ in RoverParam)')
+    parser.add_argument('--sweep-values', type=float, nargs='+', default=None,
+                        help='Values to sweep over; each initial state is replicated once per value '
+                             'with state[sweep_dim] set to that value')
 
     args = parser.parse_args()
     
@@ -655,6 +663,27 @@ def main() -> None:
 
     # Initial states (batch)
     initial_states, initial_states_grid_meta = _gather_initial_states(system, args, cfg)
+
+    # Parameter sweep: replicate each initial state per sweep value
+    if args.sweep_dim is not None or args.sweep_values is not None:
+        if args.sweep_dim is None or not args.sweep_values:
+            raise SystemExit("--sweep-dim and --sweep-values must be provided together")
+        sd_full = int(getattr(system, 'state_dim', initial_states.shape[1]))
+        # If yaml gave lower-dim states (e.g. 3D for a 4D system), pad with zeros first
+        if int(initial_states.shape[1]) < sd_full:
+            pad = torch.zeros(initial_states.shape[0], sd_full - initial_states.shape[1],
+                              dtype=initial_states.dtype)
+            initial_states = torch.cat([initial_states, pad], dim=1)
+        if not (0 <= args.sweep_dim < sd_full):
+            raise SystemExit(f"--sweep-dim {args.sweep_dim} out of range for state_dim={sd_full}")
+        sweep_vals = torch.tensor(args.sweep_values, dtype=initial_states.dtype)
+        # Cartesian product: [N, D] × [K] → [N*K, D]
+        rep = initial_states.repeat_interleave(len(sweep_vals), dim=0)
+        rep[:, args.sweep_dim] = sweep_vals.repeat(initial_states.shape[0])
+        initial_states = rep
+        print(f"Sweep expansion: dim={args.sweep_dim} values={args.sweep_values} "
+              f"→ {initial_states.shape[0]} trajectories")
+
     # Validate dimensionality early for clearer errors
     try:
         sd = int(getattr(system, 'state_dim', initial_states.shape[1]))
@@ -813,6 +842,8 @@ def main() -> None:
         'time_horizon': float(total_sim_horizon),
         'initial_states': initial_states_cpu,  # Keep as tensor [n_trajectories, state_dim]
         'initial_states_grid_meta': initial_states_grid_meta,  # None unless grid slice used
+        'sweep_dim': args.sweep_dim,                 # None unless --sweep-dim used
+        'sweep_values': list(args.sweep_values) if args.sweep_values else None,
         'device': str(device),
         'use_gpu': use_gpu,
         'batch_size': batch_size,
@@ -850,6 +881,9 @@ def main() -> None:
         'n_trajectories': n_trajectories,
         'device': str(device),
         'initial_states_grid_meta': initial_states_grid_meta,
+        'sweep_dim': args.sweep_dim,
+        'sweep_values': list(args.sweep_values) if args.sweep_values else None,
+        'system_config': snapshot_system(system),
     }
     with open(meta_path, 'w') as mf:
         json.dump(meta_export, mf, indent=2)

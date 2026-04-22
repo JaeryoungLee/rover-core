@@ -44,6 +44,59 @@ from src.utils.grids import nearest_axis_indices, nearest_time_index
 from src.utils.interactive_viz import InteractiveVisualizer, SliderSpec, create_time_slider
 
 
+# ── slicing helpers (work for any state_dim) ───────────────────────────────────
+
+def _axis_label(system: Optional[System], dim: int) -> str:
+    if system is not None and hasattr(system, 'state_labels') and dim < len(system.state_labels):
+        return system.state_labels[dim]
+    return f'dim_{dim}'
+
+
+def _resolve_fixed_indices(vf: GridValue, dims: List[int],
+                            fixed_dims: Dict[int, float]) -> Dict[int, int]:
+    """Snap fixed values to nearest grid indices; default missing dims to middle."""
+    out: Dict[int, int] = {}
+    for d in range(vf.state_dim):
+        if d in dims:
+            continue
+        if d in fixed_dims and fixed_dims[d] is not None:
+            axis_t = vf._axes[d]
+            idx = int(nearest_axis_indices(
+                axis_t,
+                torch.tensor([float(fixed_dims[d])], dtype=axis_t.dtype, device=axis_t.device),
+            )[0].item())
+        else:
+            idx = vf.grid_shape[d] // 2
+        out[d] = idx
+    return out
+
+
+def _extract_2d_slice(values_at_time, vf: GridValue, dims: List[int],
+                      fixed_indices: Dict[int, int]) -> np.ndarray:
+    """Index N-D values down to a 2-D array with axes in the order given by `dims`."""
+    sl = [fixed_indices[d] if d in fixed_indices else slice(None) for d in range(vf.state_dim)]
+    arr = values_at_time[tuple(sl)]
+    if isinstance(arr, torch.Tensor):
+        arr = arr.detach().cpu().numpy()
+    else:
+        arr = np.asarray(arr)
+    # Numpy/torch indexing preserves original axis order; transpose if user asked otherwise.
+    sorted_dims = sorted(dims)
+    if list(dims) != sorted_dims:
+        perm = [sorted_dims.index(d) for d in dims]
+        arr = arr.transpose(perm)
+    return arr
+
+
+def _format_fixed_str(system: Optional[System], fixed_indices: Dict[int, int],
+                      vf: GridValue) -> str:
+    parts = []
+    for d, i in sorted(fixed_indices.items()):
+        v = float(vf._axes[d][i].item())
+        parts.append(f"{_axis_label(system, d)}={v:.2f}")
+    return ', '.join(parts)
+
+
 def visualize_value_slice_2d(
     vf: GridValue,
     system: System,
@@ -213,39 +266,48 @@ def visualize_2d_slices(
     vf: GridValue,
     system: System,
     time_indices: List[int],
-    output_dir: Path,
-    slice_dim: int = 2,
-    slice_value: Optional[float] = None
+    save_dir: Path,
+    dims: Optional[List[int]] = None,
+    fixed_dims: Optional[Dict[int, float]] = None,
+    title_prefix: Optional[str] = None,
+    filename: str = 'value_function_slices.png',
+    tag: Optional[str] = None,
 ):
     """
-    Visualize 2D slices of the grid value (value function) at different times.
-    
+    Visualize 2D slices of the value function at the requested times.
+
     Args:
-    vf: GridValue instance
-        system: System instance (for obstacles)
-        time_indices: List of time indices to visualize
+        vf: GridValue instance
+        system: System instance (for obstacles / labels)
+        time_indices: Time indices to visualize
         output_dir: Output directory for plots
-        slice_dim: Dimension to slice (for 3D state spaces)
-        slice_value: Value at which to slice (None = middle)
+        dims: The two state-dim indices to plot on (x, y) of each subplot.
+              Defaults to [0, 1].
+        fixed_dims: {dim_idx: value} for the remaining state dims. Missing dims
+                    default to the middle of their axis.
+        title_prefix: Optional string prepended to the suptitle.
     """
-    
+
     print(f"\nGenerating 2D slice visualizations...")
-    
+    output_dir =  save_dir/'value_function_slices'
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if vf.state_dim < 2:
         print("Cannot create 2D slices for 1D state space")
         return
-    
-    # Determine slice index for 3D state spaces
-    if vf.state_dim > 2:
-        if slice_value is None:
-            slice_idx = vf.grid_shape[slice_dim] // 2
-        else:
-            coord_t = vf._axes[slice_dim]
-            slice_idx = int(nearest_axis_indices(coord_t, torch.tensor([float(slice_value)], dtype=coord_t.dtype, device=coord_t.device))[0].item())
-        slice_val = float(vf._axes[slice_dim][slice_idx].item())
-        print(f"  Slicing at dimension {slice_dim}, index {slice_idx}, value {slice_val:.3f}")
+
+    if dims is None:
+        dims = [0, 1]
+    if fixed_dims is None:
+        fixed_dims = {}
+    if len(dims) != 2:
+        print(f"`dims` must be exactly 2 entries, got {dims}")
+        return
+
+    fixed_indices = _resolve_fixed_indices(vf, dims, fixed_dims)
+    fixed_str = _format_fixed_str(system, fixed_indices, vf)
+    if fixed_indices:
+        print(f"  Plot dims={dims} | fixed: {fixed_str}")
     
     # Create figure
     n_times = len(time_indices)
@@ -258,231 +320,262 @@ def visualize_2d_slices(
     from matplotlib.colors import TwoSlopeNorm
     vmin_all, vmax_all = None, None
     for time_idx in time_indices:
-        value_slice = vf._values[..., time_idx]
-        if vf.state_dim == 2:
-            value_2d_tmp = value_slice
-        elif vf.state_dim == 3:
-            if slice_dim == 2:
-                value_2d_tmp = value_slice[:, :, slice_idx]
-            elif slice_dim == 1:
-                value_2d_tmp = value_slice[:, slice_idx, :]
-            else:
-                value_2d_tmp = value_slice[slice_idx, :, :]
-        else:
-            continue
-        # Ensure numpy arrays for reduction operations
-        if isinstance(value_2d_tmp, torch.Tensor):
-            value_2d_arr = value_2d_tmp.detach().cpu().numpy()
-        else:
-            value_2d_arr = np.asarray(value_2d_tmp)
+        value_at_t = vf._values[..., time_idx]
+        value_2d_arr = _extract_2d_slice(value_at_t, vf, dims, fixed_indices)
         vmin_cur = float(np.min(value_2d_arr))
         vmax_cur = float(np.max(value_2d_arr))
         vmin_all = vmin_cur if vmin_all is None else min(vmin_all, vmin_cur)
         vmax_all = vmax_cur if vmax_all is None else max(vmax_all, vmax_cur)
-    vabs = max(abs(vmin_all if vmin_all is not None else 0.0), abs(vmax_all if vmax_all is not None else 0.0))
+    vabs = max(abs(vmin_all or 0.0), abs(vmax_all or 0.0), 1e-9)
     norm = TwoSlopeNorm(vmin=-vabs, vcenter=0.0, vmax=vabs)
+
+    # Pre-build meshgrid for the chosen dims
+    X, Y = np.meshgrid(
+        vf._axes[dims[0]].detach().cpu().numpy(),
+        vf._axes[dims[1]].detach().cpu().numpy(),
+        indexing='ij',
+    )
+    xlabel = _axis_label(system, dims[0])
+    ylabel = _axis_label(system, dims[1])
+
+    spatial_xy = (sorted(dims) == [0, 1])
 
     for idx, time_idx in enumerate(time_indices):
         ax = axes[idx]
-        
-        # Get grid value at this time (time-last storage)
-        value_slice = vf._values[..., time_idx]
-        
-        # Extract 2D slice if needed
-        if vf.state_dim == 2:
-            value_2d = value_slice
-            X, Y = np.meshgrid(
-                vf._axes[0].detach().cpu().numpy(),
-                vf._axes[1].detach().cpu().numpy(),
-                indexing='ij'
-            )
-            xlabel, ylabel = 'x', 'y'
-        elif vf.state_dim == 3:
-            if slice_dim == 2:
-                value_2d = value_slice[:, :, slice_idx]
-                X, Y = np.meshgrid(
-                    vf._axes[0].detach().cpu().numpy(),
-                    vf._axes[1].detach().cpu().numpy(),
-                    indexing='ij'
-                )
-                xlabel, ylabel = 'x', 'y'
-            elif slice_dim == 1:
-                value_2d = value_slice[:, slice_idx, :]
-                X, Y = np.meshgrid(
-                    vf._axes[0].detach().cpu().numpy(),
-                    vf._axes[2].detach().cpu().numpy(),
-                    indexing='ij'
-                )
-                xlabel, ylabel = 'x', 'θ'
-            else:  # slice_dim == 0
-                value_2d = value_slice[slice_idx, :, :]
-                X, Y = np.meshgrid(
-                    vf._axes[1].detach().cpu().numpy(),
-                    vf._axes[2].detach().cpu().numpy(),
-                    indexing='ij'
-                )
-                xlabel, ylabel = 'y', 'θ'
-        else:
-            print(f"Visualization not supported for {vf.state_dim}D state spaces")
-            return
-        
-        # Convert to numpy for matplotlib
-        if isinstance(value_2d, torch.Tensor):
-            value_2d_np = value_2d.detach().cpu().numpy()
-        else:
-            value_2d_np = np.asarray(value_2d)
+        value_at_t = vf._values[..., time_idx]
+        value_2d_np = _extract_2d_slice(value_at_t, vf, dims, fixed_indices)
 
         # Plot filled contours with colorbar centered at 0
         levels = np.linspace(-vabs, vabs, 21)
-        cf = ax.contourf(X, Y, value_2d_np, levels=levels, cmap='RdYlBu', norm=norm)
-        
+        ax.contourf(X, Y, value_2d_np, levels=levels, cmap='RdYlBu', norm=norm)
+
         # Zero level set (boundary of reachable set)
         ax.contour(X, Y, value_2d_np, levels=[0.0], colors='black', linewidths=2, linestyles='-')
-        
-        # Add obstacles and goal (if 2D spatial)
-        if vf.state_dim >= 2 and slice_dim >= 2:
+
+        # Obstacles + goal only when both spatial dims are visible
+        if spatial_xy and system is not None:
             from src.utils.obstacles import draw_obstacles_2d, draw_goal_2d
             draw_obstacles_2d(ax, system, zorder=10)
             draw_goal_2d(ax, system, zorder=10)
-        
-        # Format
+
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_xlim(float(X.min()), float(X.max()))
         ax.set_ylim(float(Y.min()), float(Y.max()))
         ax.set_title(f't = {float(vf._times[time_idx].item()):.2f}s')
-        ax.set_aspect('equal')
+        if spatial_xy:
+            ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
-        
+
     # Single shared colorbar for consistency across subplots
     sm = plt.cm.ScalarMappable(norm=norm, cmap='RdYlBu')
     sm.set_array([])
     fig.colorbar(sm, ax=axes, label='Value', shrink=0.9)
-    
-    # Overall title
-    if vf.state_dim > 2:
-        dim_names = ['x', 'y', 'θ']
-        slice_name = dim_names[slice_dim] if slice_dim < len(dim_names) else f'dim{slice_dim}'
-        plt.suptitle(f'Backward Reachable Tube ({slice_name} = {slice_val:.2f})', fontsize=14)
+
+    # Overall title (prefix with tag so uncertainty/system are visible at a glance)
+    head = title_prefix or 'Backward Reachable Tube'
+    if tag:
+        head = f'[{tag}]\n{head}'
+    if fixed_indices:
+        plt.suptitle(f'{head}  ({fixed_str})', fontsize=14)
     else:
-        plt.suptitle('Backward Reachable Tube', fontsize=14)
+        plt.suptitle(head, fontsize=14)
     
-    output_file = output_dir / 'value_function_slices.png'
+    output_file = output_dir / filename
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: {output_file}")
+    print(f"  ✓ {output_file.name}")
     
+    plt.close()
+
+
+def visualize_param_sweep(
+    vf: GridValue,
+    system: Optional[System],
+    output_dir: Path,
+    dims: List[int],
+    sweep_dim: int,
+    sweep_values: List[float],
+    fixed_dims: Optional[Dict[int, float]] = None,
+    time: float = 0.0,
+    title_prefix: Optional[str] = None,
+    filename: str = 'param_sweep.png',
+    tag: Optional[str] = None,
+):
+    """One figure, N subplots — same 2D slice but with `sweep_dim` taking each value.
+
+    Useful for showing e.g. how the initial BRT changes with λ.
+    """
+
+    print(f"\nGenerating parameter sweep visualization (dim={sweep_dim})...")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if fixed_dims is None:
+        fixed_dims = {}
+    if len(dims) != 2:
+        print(f"`dims` must be exactly 2 entries, got {dims}")
+        return
+    if sweep_dim in dims:
+        print(f"sweep_dim {sweep_dim} cannot be one of the plotted dims {dims}")
+        return
+
+    # Snap time to grid
+    t_idx = int(nearest_time_index(vf._times, float(time))[0].item())
+    t_val = float(vf._times[t_idx].item())
+    value_at_t = vf._values[..., t_idx]
+
+    # Pre-compute each subplot's 2D slice and a shared vabs
+    slices_2d = []
+    fixed_per_sub = []
+    vabs = 1e-9
+    for sv in sweep_values:
+        fd = {**fixed_dims, sweep_dim: float(sv)}
+        fixed_indices = _resolve_fixed_indices(vf, dims, fd)
+        arr = _extract_2d_slice(value_at_t, vf, dims, fixed_indices)
+        slices_2d.append(arr)
+        fixed_per_sub.append(fixed_indices)
+        vabs = max(vabs, float(np.max(np.abs(arr))))
+
+    from matplotlib.colors import TwoSlopeNorm
+    norm = TwoSlopeNorm(vmin=-vabs, vcenter=0.0, vmax=vabs)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+
+    X, Y = np.meshgrid(
+        vf._axes[dims[0]].detach().cpu().numpy(),
+        vf._axes[dims[1]].detach().cpu().numpy(),
+        indexing='ij',
+    )
+    xlabel = _axis_label(system, dims[0])
+    ylabel = _axis_label(system, dims[1])
+    spatial_xy = (sorted(dims) == [0, 1])
+    sweep_label = _axis_label(system, sweep_dim)
+
+    # Color each zero level set by its sweep value
+    cmap = plt.cm.viridis
+    sw_min, sw_max = float(min(sweep_values)), float(max(sweep_values))
+    sw_range = sw_max - sw_min if sw_max > sw_min else 1.0
+    proxies = []
+    proxy_labels = []
+    for sv, arr, fi in zip(sweep_values, slices_2d, fixed_per_sub):
+        color = cmap((float(sv) - sw_min) / sw_range)
+        ax.contour(X, Y, arr, levels=[0.0], colors=[color], linewidths=2, linestyles='-')
+        snapped = float(vf._axes[sweep_dim][fi[sweep_dim]].item())
+        proxies.append(plt.Line2D([0], [0], color=color, linewidth=2))
+        proxy_labels.append(f'{sweep_label} = {snapped:.2f}')
+
+    if spatial_xy and system is not None:
+        from src.utils.obstacles import draw_obstacles_2d, draw_goal_2d
+        draw_obstacles_2d(ax, system, zorder=10)
+        draw_goal_2d(ax, system, zorder=10)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_xlim(float(X.min()), float(X.max()))
+    ax.set_ylim(float(Y.min()), float(Y.max()))
+    if spatial_xy:
+        ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+    ax.legend(proxies, proxy_labels, loc='best', fontsize=9)
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(vmin=sw_min, vmax=sw_max))
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, label=sweep_label, shrink=0.85)
+
+    head = title_prefix or f'BRT zero level vs {sweep_label} (t = {t_val:.2f}s)'
+    if tag:
+        head = f'[{tag}]\n{head}'
+    ax.set_title(head)
+
+    output_file = output_dir / filename
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    print(f"  ✓ {output_file.name}")
     plt.close()
 
 
 def visualize_reachable_set_evolution(
     vf: GridValue,
-    output_dir: Path,
-    slice_dim: int = 2,
-    slice_value: Optional[float] = None,
-    num_frames: int = 10
+    save_dir: Path,
+    system: Optional[System] = None,
+    dims: Optional[List[int]] = None,
+    fixed_dims: Optional[Dict[int, float]] = None,
+    num_frames: int = 10,
+    title_prefix: Optional[str] = None,
+    filename: str = 'reachable_set_evolution.png',
+    tag: Optional[str] = None,
 ):
-    """
-    Visualize evolution of reachable set boundary over time.
-    
-    Args:
-        vf: ValueFunction instance
-        output_dir: Output directory
-        slice_dim: Dimension to slice (for 3D state spaces)
-        slice_value: Value at which to slice (None = middle)
-        num_frames: Number of time frames to show
-    """
-    
+    """Plot zero level sets at multiple times on a single 2D slice."""
+
     print(f"\nGenerating reachable set evolution visualization...")
-    
+    output_dir = save_dir/'reachable_set_evolution'
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if vf.state_dim < 2:
         print("Cannot visualize evolution for 1D state space")
         return
-    
-    # Determine slice index for 3D state spaces
-    if vf.state_dim > 2:
-        if slice_value is None:
-            slice_idx = vf.grid_shape[slice_dim] // 2
-        else:
-            coord_t = vf._axes[slice_dim]
-            slice_idx = int(nearest_axis_indices(coord_t, torch.tensor([float(slice_value)], dtype=coord_t.dtype, device=coord_t.device))[0].item())
-    
-    # Select time indices
-    time_indices = np.linspace(0, int(vf._times.shape[0]) - 1, num_frames, dtype=int)
-    
-    # Create figure
-    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    
-    # Get meshgrid
-    if vf.state_dim == 2:
-        X, Y = np.meshgrid(
-            vf._axes[0].detach().cpu().numpy(),
-            vf._axes[1].detach().cpu().numpy(),
-            indexing='ij'
-        )
-        xlabel, ylabel = 'x (m)', 'y (m)'
-    elif vf.state_dim == 3 and slice_dim == 2:
-        X, Y = np.meshgrid(
-            vf._axes[0].detach().cpu().numpy(),
-            vf._axes[1].detach().cpu().numpy(),
-            indexing='ij'
-        )
-        xlabel, ylabel = 'x (m)', 'y (m)'
-    else:
-        print("Visualization only supported for 2D or 3D (sliced at θ) spaces")
+
+    if dims is None:
+        dims = [0, 1]
+    if fixed_dims is None:
+        fixed_dims = {}
+    if len(dims) != 2:
+        print(f"`dims` must be exactly 2 entries, got {dims}")
         return
-    
-    # Plot zero level sets at different times
+
+    fixed_indices = _resolve_fixed_indices(vf, dims, fixed_dims)
+    fixed_str = _format_fixed_str(system, fixed_indices, vf)
+
+    time_indices = np.linspace(0, int(vf._times.shape[0]) - 1, num_frames, dtype=int)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+
+    X, Y = np.meshgrid(
+        vf._axes[dims[0]].detach().cpu().numpy(),
+        vf._axes[dims[1]].detach().cpu().numpy(),
+        indexing='ij',
+    )
+    xlabel = _axis_label(system, dims[0])
+    ylabel = _axis_label(system, dims[1])
+    spatial_xy = (sorted(dims) == [0, 1])
+
     cmap = plt.cm.viridis
-    colors = [cmap(i / (num_frames - 1)) for i in range(num_frames)]
-    
+    colors = [cmap(i / max(1, num_frames - 1)) for i in range(num_frames)]
+
     for i, time_idx in enumerate(time_indices):
-        value_slice = vf._values[..., time_idx]
-        
-        # Extract 2D slice if needed
-        if vf.state_dim == 2:
-            value_2d = value_slice
-        elif vf.state_dim == 3:
-            value_2d = value_slice[:, :, slice_idx]
-        
-        # Convert to numpy for matplotlib
-        if isinstance(value_2d, torch.Tensor):
-            value_2d_np = value_2d.detach().cpu().numpy()
-        else:
-            value_2d_np = np.asarray(value_2d)
-        
-        # Plot zero level set
-        cs = ax.contour(
-            X, Y, value_2d_np,
-            levels=[0.0],
-            colors=[colors[i]],
-            linewidths=2,
-            linestyles='-'
-        )
-        
-        # Label
-        if i % max(1, num_frames // 5) == 0:  # Label every few contours
-            ax.clabel(cs, fmt=f't={float(vf._times[time_idx].item()):.2f}s', inline=True, fontsize=8)
-    
-    # Format
+        value_at_t = vf._values[..., time_idx]
+        value_2d_np = _extract_2d_slice(value_at_t, vf, dims, fixed_indices)
+
+        cs = ax.contour(X, Y, value_2d_np, levels=[0.0],
+                        colors=[colors[i]], linewidths=2, linestyles='-')
+        if i % max(1, num_frames // 5) == 0:
+            ax.clabel(cs, fmt=f't={float(vf._times[time_idx].item()):.2f}s',
+                      inline=True, fontsize=8)
+
+    if spatial_xy and system is not None:
+        from src.utils.obstacles import draw_obstacles_2d, draw_goal_2d
+        draw_obstacles_2d(ax, system, zorder=10)
+        draw_goal_2d(ax, system, zorder=10)
+
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_title('Reachable Set Evolution')
-    ax.set_aspect('equal')
+    head = title_prefix or 'Reachable Set Evolution'
+    if tag:
+        head = f'[{tag}]\n{head}'
+    ax.set_title(f'{head}  ({fixed_str})' if fixed_str else head)
+    if spatial_xy:
+        ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
-    
-    # Add colorbar for time
+
     sm = plt.cm.ScalarMappable(
         cmap=cmap,
-        norm=Normalize(vmin=float(vf._times[0].item()), vmax=float(vf._times[-1].item()))
+        norm=Normalize(vmin=float(vf._times[0].item()), vmax=float(vf._times[-1].item())),
     )
     sm.set_array([])
     plt.colorbar(sm, ax=ax, label='Time (s)')
-    
-    output_file = output_dir / 'reachable_set_evolution.png'
+
+    output_file = output_dir / filename
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: {output_file}")
+    print(f"  ✓ {output_file.name}")
+    plt.close()
     
     plt.close()
 
@@ -584,9 +677,14 @@ def main():
                        help='Time indices to visualize (default: 0, middle, -1)')
     
     parser.add_argument('--slice-dim', type=int, default=2,
-                       help='Dimension to slice for 3D state spaces (default: 2)')
+                       help='[legacy] Dimension to slice for 3D state spaces (default: 2)')
     parser.add_argument('--slice-value', type=float, default=None,
-                       help='Value at which to slice (default: middle)')
+                       help='[legacy] Value at which to slice (default: middle)')
+    parser.add_argument('--dims', type=int, nargs=2, default=None, metavar=('D1', 'D2'),
+                       help='The two state dims to plot (x, y) of the figure. Default: [0, 1]')
+    parser.add_argument('--fixed', type=str, nargs='+', default=None, metavar='DIM=VALUE',
+                       help='Fix one or more non-plotted dims, e.g. --fixed 2=0.0 3=0.5. '
+                            'Missing dims default to middle of their axis.')
     
     parser.add_argument('--evolution-frames', type=int, default=10,
                        help='Number of frames for evolution plot (default: 10)')
@@ -653,99 +751,147 @@ def main():
         # Back-compat: treat --output as --save-dir
         output_dir = Path(args.output)
 
-    if args.preset:
-        # Preset-driven visualization using shared loader
-        sys_name = meta.get('system_name', 'UnknownSystem')
-        preset_node = load_visualization_presets(sys_name, 'default', preset)
-        if not isinstance(preset_node, dict) or not preset_node:
-            print(f"✗ Preset not found for system={sys_name}, input=default, preset={preset}")
-            return
+    # Preset-driven visualization: explicit --preset OR auto-discover `default` from YAML
+    sys_name = meta.get('system_name', 'UnknownSystem')
+    preset_node = load_visualization_presets(sys_name, 'default', preset)
+    has_preset = isinstance(preset_node, dict) and bool(preset_node.get('slices'))
+
+    if args.preset and not has_preset:
+        print(f"✗ Preset not found for system={sys_name}, input=default, preset={preset}")
+        return
+
+    if has_preset:
+        if not args.preset:
+            print(f"ℹ Using preset '{preset}' from visualizations.yaml (pass --preset to pick another)")
         slices: List[Dict[str, Any]] = preset_node.get('slices', []) or []
         if not slices:
             print("⚠ Warning: Preset contains no slices, using empty list")
-        # Iterate slices and generate figures
-        for s_cfg in slices:
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\nSaving figures to {output_dir}...")
+
+        for idx, s_cfg in enumerate(slices):
             dims = s_cfg.get('dims', [0, 1])
             if 'dims' not in s_cfg:
                 print(f"⚠ Warning: Slice missing 'dims', using default {dims}")
-            fixed: Dict[int, float] = s_cfg.get('fixed', {}) or {}
-            times_list = s_cfg.get('times', [float(vf._times[0].item())])
-            if 'times' not in s_cfg:
-                print(f"⚠ Warning: Slice missing 'times', using default {times_list}")
+            fixed: Dict[int, float] = {int(k): float(v) for k, v in (s_cfg.get('fixed', {}) or {}).items()}
+            # GridValue is inherently time-varying: ignore preset `times` (which exists for
+            # GridInput/Set snapshots) and always show BRT evolution. Override with --time-indices.
+            if args.time_indices is not None:
+                times_list = [float(vf._times[i].item()) for i in args.time_indices]
+            else:
+                tN = int(vf._times.shape[0])
+                times_list = [float(vf._times[i].item()) for i in (0, max(0, tN // 2), -1)]
             title = s_cfg.get('title', None)
-            # Determine slice axis and index
             if len(dims) != 2:
                 print(f"Skipping slice with non-2D dims: {dims}")
                 continue
-            all_dims = set(range(vf.state_dim))
-            fixed_dims = list(all_dims - set(dims))
-            if len(fixed_dims) == 1:
-                sd = fixed_dims[0]
-                if sd < 0 or sd >= vf.state_dim:
-                    print(f"Invalid fixed dim: {sd}")
-                    continue
-                # choose index nearest to fixed value if provided, else center
-                axis_t = vf._axes[sd]
-                if sd in fixed:
-                    val = float(fixed[sd])
-                    idx = int(nearest_axis_indices(axis_t, torch.tensor([val], dtype=axis_t.dtype, device=axis_t.device))[0].item())
-                else:
-                    idx = axis_t.numel() // 2
-                slice_dim = sd
-                slice_value = float(axis_t[idx].item())
-            else:
-                # Either 0 or >1 fixed dims; fall back to middle slice heuristics
-                slice_dim = 2 if vf.state_dim > 2 else (vf.state_dim - 1)
-                axis_t = vf._axes[slice_dim]
-                idx = axis_t.numel() // 2
-                slice_value = float(axis_t[idx].item())
 
-            # Map times to indices using nearest if interpolate, else require exact
-            t_array = vf._times.detach().cpu().numpy()
+            # Resolve all requested times to grid indices (one figure with subplots over time)
             time_indices: List[int] = []
             for tv in times_list:
-                # Use utility to select nearest index (handles scalar and array)
                 cand = int(nearest_time_index(vf._times, float(tv))[0].item())
                 if not args.interpolate and abs(float(vf._times[cand].item()) - float(tv)) > 1e-6:
                     raise ValueError(f"Time {tv} not on grid and --interpolate not set")
                 time_indices.append(cand)
 
-            # Render using existing helper
-            d_for_slice = slice_dim
-            # Prepare directory per slice title to avoid overwrite in loops
-            # Use a subdirectory per slice to avoid overwriting files
-            if title:
-                safe = ''.join(ch if (ch.isalnum() or ch in '-_.') else '_' for ch in str(title))
-            else:
-                safe = f"dims_{dims[0]}_{dims[1]}_slice_{int(slice_dim)}"
-            subdir = output_dir / safe
-            subdir.mkdir(parents=True, exist_ok=True)
+            # Filename convention mirrors visualize_grid_set
+            fixed_str = '_'.join(f"{k}{v}" for k, v in sorted(fixed.items()))
+            base = f"{args.tag}_{preset}_slice{idx}_dims{''.join(map(str, dims))}"
+            if fixed_str:
+                base += f"_fix{fixed_str}"
+
             visualize_2d_slices(
-                vf, system, time_indices, subdir,
-                slice_dim=d_for_slice,
-                slice_value=slice_value,
+                vf, system, time_indices, output_dir,
+                dims=list(dims),
+                fixed_dims=fixed,
+                title_prefix=title,
+                filename=f"{base}.png",
+                tag=args.tag,
+            )
+
+            # Reachable set evolution on the same slice (zero level sets over time)
+            visualize_reachable_set_evolution(
+                vf, output_dir,
+                system=system,
+                dims=list(dims),
+                fixed_dims=fixed,
+                num_frames=args.evolution_frames,
+                title_prefix=title,
+                filename=f"{base}_evolution.png",
+                tag=args.tag,
+            )
+
+        # Parameter sweeps: one figure with N subplots, one per value of sweep_dim
+        sweeps: List[Dict[str, Any]] = preset_node.get('sweeps', []) or []
+        for sidx, sw_cfg in enumerate(sweeps):
+            sw_dims = sw_cfg.get('dims', [0, 1])
+            sw_sweep_dim = int(sw_cfg['sweep_dim'])
+            sw_values = [float(v) for v in sw_cfg['sweep_values']]
+            sw_fixed = {int(k): float(v) for k, v in (sw_cfg.get('fixed', {}) or {}).items()}
+            sw_time = float(sw_cfg.get('time', 0.0))
+            sw_title = sw_cfg.get('title', None)
+
+            fixed_tag = '_'.join(f"{k}{v}" for k, v in sorted(sw_fixed.items()))
+            sw_base = f"sweep{sidx}_dims{''.join(map(str, sw_dims))}_sw{sw_sweep_dim}"
+            if fixed_tag:
+                sw_base += f"_fix{fixed_tag}"
+            sw_base += f"_t{sw_time:.1f}"
+
+            visualize_param_sweep(
+                vf, system, output_dir,
+                dims=list(sw_dims),
+                sweep_dim=sw_sweep_dim,
+                sweep_values=sw_values,
+                fixed_dims=sw_fixed,
+                time=sw_time,
+                title_prefix=sw_title,
+                filename=f"{sw_base}.png",
+                tag=args.tag,
             )
     else:
-        # Fallback manual visualization similar to previous default
-        # Determine time indices
+        # No preset in YAML → fall back to CLI args / sensible defaults
         if args.time_indices is None:
             tN = int(vf._times.shape[0]) if getattr(vf, '_times', None) is not None else 1
-            mid = max(0, (tN // 2))
-            time_indices = [0, mid, -1]
+            time_indices = [0, max(0, tN // 2), -1]
         else:
             time_indices = args.time_indices
 
-        # Generate visualizations
+        # Parse --fixed "dim=value" pairs (multi)
+        fixed_from_cli: Dict[int, float] = {}
+        for item in (args.fixed or []):
+            if '=' not in item:
+                raise ValueError(f"--fixed expects DIM=VALUE, got {item!r}")
+            k, v = item.split('=', 1)
+            fixed_from_cli[int(k)] = float(v)
+
+        # Resolve `dims`: prefer explicit --dims; else derive from legacy --slice-dim.
+        if args.dims is not None:
+            dims_arg = args.dims
+        else:
+            # Legacy behavior: the 2 plotted dims are all dims except slice_dim (plus any --fixed),
+            # picked as the two lowest-index dims not in the fixed set.
+            excluded = set(fixed_from_cli.keys()) | {args.slice_dim}
+            dims_arg = [d for d in range(vf.state_dim) if d not in excluded][:2]
+            if len(dims_arg) < 2:
+                dims_arg = [0, 1]
+            # Honor legacy --slice-value by adding slice_dim to fixed_from_cli
+            if args.slice_value is not None:
+                fixed_from_cli.setdefault(args.slice_dim, float(args.slice_value))
+
         visualize_2d_slices(
             vf, system, time_indices, output_dir,
-            slice_dim=args.slice_dim,
-            slice_value=args.slice_value
+            dims=dims_arg,
+            fixed_dims=fixed_from_cli,
+            tag=args.tag,
         )
         visualize_reachable_set_evolution(
             vf, output_dir,
-            slice_dim=args.slice_dim,
-            slice_value=args.slice_value,
-            num_frames=args.evolution_frames
+            system=system,
+            dims=dims_arg,
+            fixed_dims=fixed_from_cli,
+            num_frames=args.evolution_frames,
+            tag=args.tag,
         )
     
     print("\n" + "=" * 60)

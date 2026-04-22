@@ -39,6 +39,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import matplotlib
 import torch
 import numpy as np
 
@@ -416,23 +417,27 @@ def visualize_simulation(
     for res in results:
         renderer.add(res)
 
-    # Pre-compute per-trajectory colors from value function if provided
-    traj_colors = []
-    if value_tag is not None:
-        try:
-            gv = load_grid_value_by_tag(value_tag, interpolate=True)
-            init_states_tensor = torch.as_tensor(
-                data['initial_states'] if isinstance(data['initial_states'], torch.Tensor)
-                else np.asarray(data['initial_states']),
-                dtype=torch.float32,
-            )
-            with torch.no_grad():
-                v_init = gv.value(init_states_tensor, value_time)
-            for v in v_init:
-                safe = float(v.item()) < 0.0 if reach_avoid else float(v.item()) > 0.0
-                traj_colors.append('tab:blue' if safe else 'tab:red')
-        except Exception as exc:
-            print(f"Warning: could not compute value colors: {exc}")
+    # Pre-compute per-trajectory colors.  Sweep-based coloring wins over the
+    # value-function-based red/blue coloring, since a sweep is the more informative
+    # visual signal when it's present.
+    traj_colors, _, _, _ = _compute_sweep_colors(data)
+    if traj_colors is None:
+        traj_colors = []
+        if value_tag is not None:
+            try:
+                gv = load_grid_value_by_tag(value_tag, interpolate=True)
+                init_states_tensor = torch.as_tensor(
+                    data['initial_states'] if isinstance(data['initial_states'], torch.Tensor)
+                    else np.asarray(data['initial_states']),
+                    dtype=torch.float32,
+                )
+                with torch.no_grad():
+                    v_init = gv.value(init_states_tensor, value_time)
+                for v in v_init:
+                    safe = float(v.item()) < 0.0 if reach_avoid else float(v.item()) > 0.0
+                    traj_colors.append('tab:blue' if safe else 'tab:red')
+            except Exception as exc:
+                print(f"Warning: could not compute value colors: {exc}")
 
     # Apply trajectory colors and line styles
     try:
@@ -487,6 +492,15 @@ def visualize_simulation(
     except Exception:
         pass
 
+    # Add λ-sweep legend proxies (one per unique sweep value) before building the legend
+    try:
+        _, sw_dim, sw_unique, sw_unique_colors = _compute_sweep_colors(data)
+        if sw_dim is not None and sw_unique:
+            for sv, c in zip(sw_unique, sw_unique_colors):
+                renderer.ax.plot([], [], color=c, linewidth=2, label=rf'$\lambda$ = {float(sv):.2f}')
+    except Exception:
+        pass
+
     # Reposition legend outside plotting area
     try:
         handles, labels = renderer.ax.get_legend_handles_labels()
@@ -498,8 +512,11 @@ def visualize_simulation(
     except Exception:
         pass
 
-    # Animated zero-level set + optional static ghost contours
-    if value_tag is not None:
+    # Animated zero-level set + optional static ghost contours.
+    # Skip when this is a parameter-sweep simulation: a single midpoint contour
+    # would be misleading when trajectories span multiple λ values, and per-λ
+    # animated contours add too much visual clutter to the video.
+    if value_tag is not None and data.get('sweep_dim') is None:
         try:
             gv = load_grid_value_by_tag(value_tag, interpolate=True)
             axes_vecs = gv.metadata.get('grid_coordinate_vectors')
@@ -622,8 +639,15 @@ def visualize_simulation(
         print(f"\n✓ Visualization complete (video generation skipped)")
 
 
-def _overlay_zero_level(ax, system, value_tag: str, value_time: float) -> None:
-    """Draw the zero-level contour of a GridValue onto ax (xy-plane, other dims at midpoint)."""
+def _overlay_zero_level(ax, system, value_tag: str, value_time: float,
+                        sweep_dim: Optional[int] = None,
+                        sweep_values: Optional[list] = None,
+                        sweep_colors: Optional[list] = None) -> None:
+    """Draw the zero-level contour of a GridValue onto ax.
+
+    If sweep_dim is given and the value grid has that dim, draw one contour per
+    sweep value (color-matched via sweep_colors). Otherwise a single midpoint contour.
+    """
     try:
         gv = load_grid_value_by_tag(value_tag, interpolate=True)
         axes_vecs = gv.metadata.get('grid_coordinate_vectors')
@@ -634,15 +658,53 @@ def _overlay_zero_level(ax, system, value_tag: str, value_time: float) -> None:
         X, Y = np.meshgrid(x, y, indexing='ij')
         state_dim = int(system.state_dim)
         mids = [float(np.asarray(a)[len(np.asarray(a)) // 2]) for a in axes_vecs]
-        base = torch.as_tensor(mids[:state_dim], dtype=torch.float32)
-        pts = base.repeat(X.size, 1)
-        pts[:, 0] = torch.as_tensor(X.reshape(-1), dtype=torch.float32)
-        pts[:, 1] = torch.as_tensor(Y.reshape(-1), dtype=torch.float32)
-        with torch.no_grad():
-            V = gv.value(pts, value_time).reshape(X.shape[0], X.shape[1]).cpu().numpy()
-        ax.contour(X, Y, V, levels=[0.0], colors='k', linewidths=2)
+
+        import matplotlib.lines as mlines
+
+        def _draw_one(fix_dim: Optional[int], fix_val: Optional[float], color, label):
+            base = torch.as_tensor(mids[:state_dim], dtype=torch.float32)
+            pts = base.repeat(X.size, 1)
+            pts[:, 0] = torch.as_tensor(X.reshape(-1), dtype=torch.float32)
+            pts[:, 1] = torch.as_tensor(Y.reshape(-1), dtype=torch.float32)
+            if fix_dim is not None:
+                pts[:, fix_dim] = float(fix_val)
+            with torch.no_grad():
+                V = gv.value(pts, value_time).reshape(X.shape[0], X.shape[1]).cpu().numpy()
+            ax.contour(X, Y, V, levels=[0.0], colors=[color], linewidths=1.5)
+            if label is not None:
+                # Add a legend proxy since ContourSet no longer exposes .collections
+                ax.plot([], [], color=color, linewidth=1, label=label)
+
+        if sweep_dim is not None and sweep_values and sweep_dim < state_dim:
+            colors = sweep_colors or ['k'] * len(sweep_values)
+            for sv, c in zip(sweep_values, colors):
+                _draw_one(sweep_dim, float(sv), c, label=f'BRT λ={float(sv):.2f}')
+        else:
+            _draw_one(None, None, 'k', label=None)
     except Exception as exc:
         print(f"Warning: could not overlay value zero-level set: {exc}")
+
+
+def _compute_sweep_colors(data) -> tuple[Optional[list], Optional[int], Optional[list], Optional[list]]:
+    """Return (per-trajectory colors, sweep_dim, unique_sweep_values, per-unique colors) or all None."""
+    sweep_dim = data.get('sweep_dim')
+    if sweep_dim is None:
+        return None, None, None, None
+    sweep_dim = int(sweep_dim)
+    init_np = data['initial_states']
+    if isinstance(init_np, torch.Tensor):
+        init_np = init_np.detach().cpu().numpy()
+    vals = np.asarray(init_np[:, sweep_dim], dtype=float)
+    sw_values = data.get('sweep_values')
+    unique_vals = list(sw_values) if sw_values else sorted(set(vals.tolist()))
+    vmin = float(min(unique_vals))
+    vmax = float(max(unique_vals))
+    if vmax == vmin:
+        vmax = vmin + 1e-9
+    cmap = matplotlib.colormaps.get_cmap('viridis')
+    traj_colors = [cmap((v - vmin) / (vmax - vmin)) for v in vals]
+    unique_colors = [cmap((float(v) - vmin) / (vmax - vmin)) for v in unique_vals]
+    return traj_colors, sweep_dim, unique_vals, unique_colors
 
 
 def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color: bool = False, hide_est: bool = False, dpi: int = 150, xlim: Optional[tuple[float, float]] = None, ylim: Optional[tuple[float, float]] = None, value_tag: Optional[str] = None, value_time: float = 0.0, reach_avoid: bool = False) -> None:
@@ -697,23 +759,26 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
         res.times = times
         renderer.add(res)
 
-    # Pre-compute per-trajectory BRT color if value_tag provided
-    traj_colors = []
-    if value_tag is not None:
-        try:
-            gv = load_grid_value_by_tag(value_tag, interpolate=True)
-            init_states_tensor = torch.as_tensor(
-                data['initial_states'] if isinstance(data['initial_states'], torch.Tensor)
-                else np.asarray(data['initial_states']),
-                dtype=torch.float32,
-            )  # [N, state_dim]
-            with torch.no_grad():
-                v_init = gv.value(init_states_tensor, value_time)  # [N]
-            for v in v_init:
-                safe = float(v.item()) < 0.0 if reach_avoid else float(v.item()) > 0.0
-                traj_colors.append('tab:blue' if safe else 'tab:red')
-        except Exception as exc:
-            print(f"Warning: could not compute BRT colors: {exc}")
+    # Pre-compute per-trajectory BRT color. Sweep-based coloring (e.g. by λ) takes
+    # priority over the value-function red/blue coloring when a sweep is present.
+    traj_colors, _, _, _ = _compute_sweep_colors(data)
+    if traj_colors is None:
+        traj_colors = []
+        if value_tag is not None:
+            try:
+                gv = load_grid_value_by_tag(value_tag, interpolate=True)
+                init_states_tensor = torch.as_tensor(
+                    data['initial_states'] if isinstance(data['initial_states'], torch.Tensor)
+                    else np.asarray(data['initial_states']),
+                    dtype=torch.float32,
+                )  # [N, state_dim]
+                with torch.no_grad():
+                    v_init = gv.value(init_states_tensor, value_time)  # [N]
+                for v in v_init:
+                    safe = float(v.item()) < 0.0 if reach_avoid else float(v.item()) > 0.0
+                    traj_colors.append('tab:blue' if safe else 'tab:red')
+            except Exception as exc:
+                print(f"Warning: could not compute BRT colors: {exc}")
 
     # Initialize and update to final frame, then save
     renderer._init_animation()  # type: ignore[attr-defined]
@@ -803,7 +868,16 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
     except Exception:
         pass
 
-    # Legend outside
+    # Overlay value function zero-level set BEFORE the legend so per-λ contour
+    # proxies are picked up.
+    if value_tag is not None:
+        _, sw_dim, sw_unique, sw_unique_colors = _compute_sweep_colors(data)
+        _overlay_zero_level(
+            renderer.ax, system, value_tag, value_time,
+            sweep_dim=sw_dim, sweep_values=sw_unique, sweep_colors=sw_unique_colors,
+        )
+
+    # Legend outside (now includes BRT-per-λ entries)
     try:
         handles, labels = renderer.ax.get_legend_handles_labels()
         if handles and labels:
@@ -813,9 +887,6 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
             renderer.fig.subplots_adjust(right=0.68)
     except Exception:
         pass
-    # Overlay value function zero-level set if requested
-    if value_tag is not None:
-        _overlay_zero_level(renderer.ax, system, value_tag, value_time)
 
     out_dir = Path('outputs') / 'simulations' / tag
     final_path = out_dir / out_name

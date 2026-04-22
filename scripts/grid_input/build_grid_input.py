@@ -42,6 +42,7 @@ from src.utils.registry import (
     get_system_to_inputs_map,
 )
 from src.utils.cache_loaders import load_nn_input_by_tag, get_nn_input_metadata
+from src.utils.system_snapshot import snapshot_system
 
 
 def list_available() -> None:
@@ -342,6 +343,7 @@ Examples:
             'input': input_name,
             'input_type': getattr(input_instance, 'type', 'any'),
             'grid_shape': list(grid_cache.shape),
+            'system_config': snapshot_system(system),
         }
     }
 

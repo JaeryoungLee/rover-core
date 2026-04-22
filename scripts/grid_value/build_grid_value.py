@@ -56,6 +56,7 @@ from src.utils.cache_loaders import (
     resolve_set,
 )
 from src.utils.config import load_resolution_config
+from src.utils.system_snapshot import snapshot_system
 from src.utils.registry import (
     get_available_hj_dynamics_classes,
     get_available_input_classes,
@@ -252,15 +253,28 @@ def solve_hj_reachability(
     
     print(f"✓ Solver completed")
     
-    # Compute gradients using HJ reachability's built-in method
-    # Vectorize over time dimension for parallel computation
+    # Compute gradients using HJ reachability's built-in method.
+    # vmap over the time axis, but process in chunks so each chunk fits in GPU memory.
     print("\nComputing gradients...")
-    
-    # Use vmap to parallelize gradient computation across time steps
     grad_fn = lambda val_slice: grid.grad_values(val_slice, solver_settings.upwind_scheme)
-    gradients = jax.vmap(grad_fn)(values)
-    
-    print(f"✓ Gradients computed (parallelized via vmap)")
+    chunked_grad = jax.jit(jax.vmap(grad_fn))
+
+    n_times = values.shape[0]
+    # Heuristic: ~1 GiB per time step at 51×51×51×11 grid; tune via env var if needed.
+    import os
+    chunk = int(os.environ.get('GRAD_TIME_CHUNK', '4'))
+    chunk = max(1, min(chunk, n_times))
+    print(f"  Time chunks: {chunk} steps at a time (set GRAD_TIME_CHUNK to override)")
+
+    grad_chunks = []
+    for t0 in range(0, n_times, chunk):
+        t1 = min(t0 + chunk, n_times)
+        gc = chunked_grad(values[t0:t1])
+        # Move to host immediately to free GPU memory before the next chunk
+        grad_chunks.append(np.asarray(gc))
+    gradients = np.concatenate(grad_chunks, axis=0)
+
+    print(f"✓ Gradients computed (chunked vmap, chunk={chunk})")
     print(f"  Gradient shape: {gradients.shape}")
     
     return np.array(values), times, np.array(gradients)
@@ -355,9 +369,10 @@ def build_value_function(
             else:
                 raise ValueError(f"System {system_name} has no attribute '{key}'")
 
-    # Create dynamics (per public interface, no required ctor args)
     HJDynamicsClass = resolve_hj_dynamics_class(dynamics_name)
-    dynamics = HJDynamicsClass()
+    import inspect
+    ctor_params = inspect.signature(HJDynamicsClass.__init__).parameters
+    dynamics = HJDynamicsClass(reach_avoid=reach_avoid) if 'reach_avoid' in ctor_params else HJDynamicsClass()
 
     # Bind control channel (Set or Input, mutually exclusive)
     ctrl_set, ctrl_set_name = resolve_set(system, grid_set_tag=control_grid_set_tag)
@@ -557,6 +572,16 @@ def build_value_function(
         'dynamics_name': dynamics_name,
         'bindings': bindings,
         'reach_avoid': reach_avoid,
+        'system_config': snapshot_system(system),
+        # Forward uncertainty info from the linked GridSet (when applicable)
+        'uncertainty_preset': (
+            get_grid_set_metadata(control_grid_set_tag).get('uncertainty_preset')
+            if control_grid_set_tag is not None else None
+        ),
+        'uncertainty_limits': (
+            get_grid_set_metadata(control_grid_set_tag).get('uncertainty_limits')
+            if control_grid_set_tag is not None else None
+        ),
     }
     
     # Convert to ascending time for persistence and usage:

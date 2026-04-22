@@ -50,7 +50,7 @@ class RoverBaseline(RoverBase):
     _batch_size = 100000
 
     # System parameters
-    v = 2.0  # constant speed (m/s)
+    v = 5.0  # constant speed (m/s)
     time_horizon = 5.0  # s
 
     # Time-invariant uncertainty bounds (fixed, not scaled by time)
@@ -76,7 +76,7 @@ class RoverBaseline(RoverBase):
         Circle2D(center=(16.0, 0.0), radius=1.0),
     )
     goal_state = torch.tensor([20.0, 0.0, 0.0], dtype=torch.float32)
-    goal_radius: float = 1.0
+    goal_radius: float = 0.5
 
     _render_title = "RoverBaseline"
 

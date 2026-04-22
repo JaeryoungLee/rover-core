@@ -15,6 +15,47 @@
 # When using exact grid lookup (interpolate=False, the default), the 'resolution'
 # parameter is IGNORED. Instead, the actual cached grid points are used for perfect alignment.
 
+RoverParam:
+
+  default:
+    default:
+      resolution: [100, 100, 100, 20]
+      # GridValue-only: one figure with subplots across a parameter (here, λ at dim 3)
+      sweeps:
+        - dims: [0, 1]
+          sweep_dim: 3
+          sweep_values: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+          fixed: {2: 0.0}
+          time: 0.0
+          title: "Initial BRT (x,y) across λ | heading=0"
+      slices:
+        # px-py plane at heading=0, sweeping key λ values
+        - dims: [0, 1]
+          fixed: {2: 0.0, 3: 0.2}
+          times: [0.0]
+          title: "Position (x,y) | heading=0, λ=0.2"
+        - dims: [0, 1]
+          fixed: {2: 0.0, 3: 0.4}
+          times: [0.0]
+          title: "Position (x,y) | heading=0, λ≈0.3"
+        - dims: [0, 1]
+          fixed: {2: 0.0, 3: 0.6}
+          times: [0.0]
+          title: "Position (x,y) | heading=0, λ=0.5"
+        - dims: [0, 1]
+          fixed: {2: 0.0, 3: 0.8}
+          times: [0.0]
+          title: "Position (x,y) | heading=0, λ=0.5"
+        - dims: [0, 1]
+          fixed: {2: 0.0, 3: 1.0}
+          times: [0.0]
+          title: "Position (x,y) | heading=0, λ=1.0"
+        # px-λ plane at y=0, heading=0 — shows how control varies with λ along approach
+        - dims: [0, 3]
+          fixed: {1: 0.0, 2: 0.0}
+          times: [0.0]
+          title: "x vs λ | y=0, heading=0"
+
 RoverDark:
   
   default:
