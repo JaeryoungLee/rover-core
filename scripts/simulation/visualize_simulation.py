@@ -492,12 +492,20 @@ def visualize_simulation(
     except Exception:
         pass
 
-    # Add λ-sweep legend proxies (one per unique sweep value) before building the legend
+    # Add sweep-parameter legend proxies (one per unique sweep value) before building the legend.
+    # Labels show the GRID-SNAPPED value (what the BRT actually evaluates), not the raw CLI flag.
     try:
         _, sw_dim, sw_unique, sw_unique_colors = _compute_sweep_colors(data)
         if sw_dim is not None and sw_unique:
+            sw_label = (system.state_labels[sw_dim]
+                        if (system is not None and hasattr(system, 'state_labels')
+                            and sw_dim < len(system.state_labels))
+                        else f'dim_{sw_dim}')
+            sw_axis = _grid_axis_for_dim(value_tag, sw_dim) if value_tag else None
             for sv, c in zip(sw_unique, sw_unique_colors):
-                renderer.ax.plot([], [], color=c, linewidth=2, label=rf'$\lambda$ = {float(sv):.2f}')
+                snapped = _snap_to_axis(sv, sw_axis) if sw_axis is not None else float(sv)
+                renderer.ax.plot([], [], color=c, linewidth=2,
+                                  label=f'{sw_label} = {snapped:.2f}')
     except Exception:
         pass
 
@@ -639,10 +647,28 @@ def visualize_simulation(
         print(f"\n✓ Visualization complete (video generation skipped)")
 
 
+def _grid_axis_for_dim(value_tag: str, dim: int) -> Optional[np.ndarray]:
+    """Return the GridValue's coordinate axis (numpy array) for a given dim, or None on failure."""
+    try:
+        gv = load_grid_value_by_tag(value_tag, interpolate=True)
+        axes_vecs = gv.metadata.get('grid_coordinate_vectors')
+        if axes_vecs and dim < len(axes_vecs):
+            return np.asarray(axes_vecs[dim])
+    except Exception:
+        pass
+    return None
+
+
+def _snap_to_axis(value: float, axis: np.ndarray) -> float:
+    """Snap a scalar to the nearest entry in `axis`."""
+    return float(axis[int(np.argmin(np.abs(axis - float(value))))])
+
+
 def _overlay_zero_level(ax, system, value_tag: str, value_time: float,
                         sweep_dim: Optional[int] = None,
                         sweep_values: Optional[list] = None,
-                        sweep_colors: Optional[list] = None) -> None:
+                        sweep_colors: Optional[list] = None,
+                        fixed_overrides: Optional[dict] = None) -> None:
     """Draw the zero-level contour of a GridValue onto ax.
 
     If sweep_dim is given and the value grid has that dim, draw one contour per
@@ -657,12 +683,21 @@ def _overlay_zero_level(ax, system, value_tag: str, value_time: float,
         y = np.asarray(axes_vecs[1])
         X, Y = np.meshgrid(x, y, indexing='ij')
         state_dim = int(system.state_dim)
-        mids = [float(np.asarray(a)[len(np.asarray(a)) // 2]) for a in axes_vecs]
+        # Default per-dim background value = midpoint of the axis
+        defaults = [float(np.asarray(a)[len(np.asarray(a)) // 2]) for a in axes_vecs]
+        # Override with the simulation's initial-state values for any dim that's
+        # the same across all trajectories — keeps the BRT slice consistent with
+        # the trajectories' actual (λ, v, …) values rather than blind midpoints.
+        if fixed_overrides is None:
+            fixed_overrides = {}
+        for d, v in fixed_overrides.items():
+            if 0 <= d < state_dim:
+                defaults[d] = float(v)
 
         import matplotlib.lines as mlines
 
         def _draw_one(fix_dim: Optional[int], fix_val: Optional[float], color, label):
-            base = torch.as_tensor(mids[:state_dim], dtype=torch.float32)
+            base = torch.as_tensor(defaults[:state_dim], dtype=torch.float32)
             pts = base.repeat(X.size, 1)
             pts[:, 0] = torch.as_tensor(X.reshape(-1), dtype=torch.float32)
             pts[:, 1] = torch.as_tensor(Y.reshape(-1), dtype=torch.float32)
@@ -670,15 +705,21 @@ def _overlay_zero_level(ax, system, value_tag: str, value_time: float,
                 pts[:, fix_dim] = float(fix_val)
             with torch.no_grad():
                 V = gv.value(pts, value_time).reshape(X.shape[0], X.shape[1]).cpu().numpy()
-            ax.contour(X, Y, V, levels=[0.0], colors=[color], linewidths=1.5)
+            ax.contour(X, Y, V, levels=[0.0], colors=[color], linewidths=1.5, alpha=0.7)
             if label is not None:
                 # Add a legend proxy since ContourSet no longer exposes .collections
                 ax.plot([], [], color=color, linewidth=1, label=label)
 
         if sweep_dim is not None and sweep_values and sweep_dim < state_dim:
             colors = sweep_colors or ['k'] * len(sweep_values)
+            sw_label = (system.state_labels[sweep_dim]
+                        if (system is not None and hasattr(system, 'state_labels')
+                            and sweep_dim < len(system.state_labels))
+                        else f'dim_{sweep_dim}')
+            sw_axis = np.asarray(axes_vecs[sweep_dim]) if sweep_dim < len(axes_vecs) else None
             for sv, c in zip(sweep_values, colors):
-                _draw_one(sweep_dim, float(sv), c, label=f'BRT λ={float(sv):.2f}')
+                snapped = _snap_to_axis(sv, sw_axis) if sw_axis is not None else float(sv)
+                _draw_one(sweep_dim, snapped, c, label=f'BRT {sw_label}={snapped:.2f}')
         else:
             _draw_one(None, None, 'k', label=None)
     except Exception as exc:
@@ -701,7 +742,8 @@ def _compute_sweep_colors(data) -> tuple[Optional[list], Optional[int], Optional
     vmax = float(max(unique_vals))
     if vmax == vmin:
         vmax = vmin + 1e-9
-    cmap = matplotlib.colormaps.get_cmap('viridis')
+    # cmap = matplotlib.colormaps.get_cmap('viridis')
+    cmap = matplotlib.colormaps.get_cmap('bwr_r')
     traj_colors = [cmap((v - vmin) / (vmax - vmin)) for v in vals]
     unique_colors = [cmap((float(v) - vmin) / (vmax - vmin)) for v in unique_vals]
     return traj_colors, sweep_dim, unique_vals, unique_colors
@@ -872,9 +914,31 @@ def save_final_frame(tag: str, *, out_name: str = 'final_frame.png', same_color:
     # proxies are picked up.
     if value_tag is not None:
         _, sw_dim, sw_unique, sw_unique_colors = _compute_sweep_colors(data)
+        # Use the simulation's IC values to fix non-swept dims so the BRT slice
+        # matches what the trajectories actually used (instead of grid midpoints).
+        fixed_overrides: dict = {}
+        try:
+            init_np = data['initial_states']
+            if isinstance(init_np, torch.Tensor):
+                init_np = init_np.detach().cpu().numpy()
+            init_np = np.asarray(init_np)
+            sd = int(getattr(system, 'state_dim', init_np.shape[1]))
+            for d in range(sd):
+                if d in (0, 1):       # spatial dims = the plot axes; skip
+                    continue
+                if d == sw_dim:       # this dim is what's swept → handled per-contour
+                    continue
+                col = init_np[:, d]
+                # Only override if the value is consistent across trajectories
+                if np.allclose(col, col[0]):
+                    fixed_overrides[d] = float(col[0])
+        except Exception:
+            fixed_overrides = {}
+
         _overlay_zero_level(
             renderer.ax, system, value_tag, value_time,
             sweep_dim=sw_dim, sweep_values=sw_unique, sweep_colors=sw_unique_colors,
+            fixed_overrides=fixed_overrides,
         )
 
     # Legend outside (now includes BRT-per-λ entries)

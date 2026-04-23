@@ -475,7 +475,7 @@ def visualize_param_sweep(
     if spatial_xy:
         ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
-    ax.legend(proxies, proxy_labels, loc='best', fontsize=9)
+    # ax.legend(proxies, proxy_labels, loc='best', fontsize=9)
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=Normalize(vmin=sw_min, vmax=sw_max))
     sm.set_array([])
@@ -796,7 +796,7 @@ def main():
                 time_indices.append(cand)
 
             # Filename convention mirrors visualize_grid_set
-            fixed_str = '_'.join(f"{k}{v}" for k, v in sorted(fixed.items()))
+            fixed_str = '_'.join(f"{k}{float(v):.2f}" for k, v in sorted(fixed.items()))
             base = f"{args.tag}_{preset}_slice{idx}_dims{''.join(map(str, dims))}"
             if fixed_str:
                 base += f"_fix{fixed_str}"
@@ -827,12 +827,27 @@ def main():
         for sidx, sw_cfg in enumerate(sweeps):
             sw_dims = sw_cfg.get('dims', [0, 1])
             sw_sweep_dim = int(sw_cfg['sweep_dim'])
-            sw_values = [float(v) for v in sw_cfg['sweep_values']]
+
+            # Resolve sweep values from one of three modes (in priority order):
+            #   1) explicit `sweep_values: [a, b, c]`
+            #   2) `sweep_n: N`  → N evenly-spaced grid points along sweep_dim
+            #   3) (no key)      → use ALL grid points along sweep_dim
+            axis_arr = vf._axes[sw_sweep_dim].detach().cpu().numpy()
+            if sw_cfg.get('sweep_values') is not None:
+                sw_values = [float(v) for v in sw_cfg['sweep_values']]
+            elif sw_cfg.get('sweep_n') is not None:
+                n = int(sw_cfg['sweep_n'])
+                n = max(1, min(n, len(axis_arr)))
+                idxs = np.linspace(0, len(axis_arr) - 1, n).round().astype(int)
+                sw_values = [float(axis_arr[i]) for i in idxs]
+            else:
+                sw_values = [float(x) for x in axis_arr]
+
             sw_fixed = {int(k): float(v) for k, v in (sw_cfg.get('fixed', {}) or {}).items()}
             sw_time = float(sw_cfg.get('time', 0.0))
             sw_title = sw_cfg.get('title', None)
 
-            fixed_tag = '_'.join(f"{k}{v}" for k, v in sorted(sw_fixed.items()))
+            fixed_tag = '_'.join(f"{k}{float(v):.2f}" for k, v in sorted(sw_fixed.items()))
             sw_base = f"sweep{sidx}_dims{''.join(map(str, sw_dims))}_sw{sw_sweep_dim}"
             if fixed_tag:
                 sw_base += f"_fix{fixed_tag}"

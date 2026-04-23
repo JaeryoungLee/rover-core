@@ -52,6 +52,8 @@ def snapshot_system(system: Any) -> Dict[str, Any]:
         out['state_dim'] = int(system.state_dim)
     if hasattr(system, 'state_periodic'):
         out['state_periodic'] = list(system.state_periodic)
+    if hasattr(system, 'state_labels'):
+        out['state_labels'] = list(system.state_labels)
     if hasattr(system, 'time_horizon'):
         out['time_horizon'] = float(system.time_horizon)
 

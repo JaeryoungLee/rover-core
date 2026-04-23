@@ -1,13 +1,13 @@
-"""RoverParam: RoverBaseline augmented with a controller-parameter virtual state.
+"""RoverParam: RoverBaseline augmented with TWO controller-parameter virtual states.
 
-State: (px, py, heading, λ)
+State: (px, py, heading, λ, v)
   px, py, heading : physical state — identical to RoverBaseline
-  λ ∈ [0, 1]      : normalized MPC cost weight
-                    maps to obstacle_weight = λ * OBSTACLE_WEIGHT_MAX
+  λ ∈ [0, 1]      : normalized MPC obstacle-weight (× OBSTACLE_WEIGHT_MAX)
+  v ∈ [V_MIN, V_MAX] (m/s) : vehicle cruise speed (operator-set "speed cap")
 
-λ has zero dynamics and zero uncertainty.  It is a virtual state that indexes
-the family of MPC controllers so that a single GridInput / GridSet / GridValue
-covers all parameter settings simultaneously.
+Both λ and v have zero dynamics and zero uncertainty — they are virtual states
+that index the family of (controller, speed) combinations so that a single BRT
+covers the whole parameter grid.
 
 Pick the obstacle scenario via the ROVER_PARAM_SCENARIO environment variable:
     ROVER_PARAM_SCENARIO=sparse   (default — 2 obstacles)
@@ -72,34 +72,54 @@ _CFG = OBSTACLE_SCENARIOS[_SELECTED_SCENARIO]
 
 
 class RoverParam(RoverBaseline):
-    """RoverBaseline with λ appended as a 4th virtual state dimension."""
+    """RoverBaseline with (λ, v) appended as 4th and 5th virtual state dimensions."""
 
     SCENARIO: str = _SELECTED_SCENARIO
     OBSTACLE_WEIGHT_MAX: float = _CFG['obstacle_weight_max']
     obstacles = _CFG['obstacles']
 
+    # Speed range (operator-set cap). v=2.0 was the RoverBaseline default; we span
+    # [1.0, 5.0] so the BRT spans walking pace through highway-relative speeds.
+    V_MIN: float = 3.0
+    V_MAX: float = 7.0
+
     # ── augmented state ──────────────────────────────────────────────────
-    state_dim = 4
+    state_dim = 5
     state_limits = torch.tensor(
         [
-            [0.0, -5.0, -math.pi, 0.0],
-            [20.0,  5.0,  math.pi, 1.0],
+            [0.0, -5.0, -math.pi, 0.0, V_MIN],   # lo: px, py, θ, λ, v
+            [20.0,  5.0,  math.pi, 1.0, V_MAX],  # hi
         ],
         dtype=torch.float32,
     )
-    state_periodic = [False, False, True, False]
-    state_labels = (r'$p_x$ (m)', r'$p_y$ (m)', r'$\theta$ (rad)', r'$\lambda$')
+    state_periodic = [False, False, True, False, False]
+    state_labels = (r'$p_x$ (m)', r'$p_y$ (m)', r'$\theta$ (rad)',
+                    r'$\lambda$', r'$v$ (m/s)')
 
-    # ── uncertainty presets: pad RoverBaseline presets with λ = 0 ────────
+    # ── uncertainty presets: pad RoverBaseline presets with (λ, v) = 0 ───
     terminal_uncertainty_limits: Tuple[Tuple[float, ...], Tuple[float, ...]] = (
-        (-0.5, -0.5, -0.1, 0.0),
-        ( 0.5,  0.5,  0.1, 0.0),
+        (-0.5, -0.5, -0.1, 0.0, 0.0),
+        ( 0.5,  0.5,  0.1, 0.0, 0.0),
     )
+    # uncertainty_presets: dict = {
+    #     "zero":     (( 0.0,  0.0,  0.00, 0.0, 0.0), ( 0.0,  0.0,  0.00, 0.0, 0.0)),
+    #     "small":    ((-0.2, -0.2, -0.04, 0.0, 0.0), ( 0.2,  0.2,  0.04, 0.0, 0.0)),
+    #     "moderate": ((-0.5, -0.5, -0.10, 0.0, 0.0), ( 0.5,  0.5,  0.10, 0.0, 0.0)),
+    #     "harsh":    ((-0.8, -0.8, -0.20, 0.0, 0.0), ( 0.8,  0.8,  0.20, 0.0, 0.0)),
+    # }
+    
+    # uncertainty_presets: dict = {
+    #     "zero":     (( 0.0,  0.0,  0.00, 0.0, 0.0), ( 0.0,  0.0,  0.00, 0.0, 0.0)),
+    #     "small":    ((-0.2, -0.2, -0.15, 0.0, 0.0), ( 0.2,  0.2,  0.15, 0.0, 0.0)),
+    #     "moderate": ((-0.5, -0.5, -0.20, 0.0, 0.0), ( 0.5,  0.5,  0.20, 0.0, 0.0)),
+    #     "harsh":    ((-0.8, -0.8, -0.30, 4.0, 0.0), ( 0.8,  0.8,  0.30, 0.0, 0.0)),
+    # }
+
     uncertainty_presets: dict = {
-        "zero":     (( 0.0,  0.0,  0.00, 0.0), ( 0.0,  0.0,  0.00, 0.0)),
-        "small":    ((-0.2, -0.2, -0.04, 0.0), ( 0.2,  0.2,  0.04, 0.0)),
-        "moderate": ((-0.5, -0.5, -0.10, 0.0), ( 0.5,  0.5,  0.10, 0.0)),
-        "harsh":    ((-0.8, -0.8, -0.20, 0.0), ( 0.8,  0.8,  0.20, 0.0)),
+        "zero":     (( 0.0,  0.0,  0.00, 0.0, 0.0), ( 0.0,  0.0,  0.00, 0.0, 0.0)),
+        "small":    ((-0.2, -0.2, -0.15, 0.0, 0.0), ( 0.2,  0.2,  0.15, 0.0, 0.0)),
+        "moderate": ((-0.5, -0.5, -0.20, 0.0, 0.0), ( 0.5,  0.5,  0.20, 0.0, 0.0)),
+        "harsh":    ((-0.8, -0.8, -0.30, 4.0, 0.0), ( 0.8,  0.8,  0.30, 0.0, 0.0)),
     }
 
     # ── helpers ──────────────────────────────────────────────────────────
@@ -144,16 +164,17 @@ class RoverParam(RoverBaseline):
         dy = state[..., 1] - self.goal_state[1]
         return torch.hypot(dx, dy) - self.goal_radius
 
-    # ── dynamics: append λ̇ = 0 ───────────────────────────────────────────
+    # ── dynamics: append λ̇ = 0, v̇ = 0 ──────────────────────────────────
     def dynamics(self, state, control, disturbance, time):
-        x, y, heading, _lam = state.unbind(-1)
+        x, y, heading, _lam, v = state.unbind(-1)
         (omega,) = control.unbind(-1)
         return torch.stack(
             (
-                self.v * torch.cos(heading),
-                self.v * torch.sin(heading),
+                v * torch.cos(heading),
+                v * torch.sin(heading),
                 omega,
                 torch.zeros_like(omega),  # λ̇ = 0
+                torch.zeros_like(omega),  # v̇ = 0  (frozen — operator-set cruise)
             ),
             dim=-1,
         )

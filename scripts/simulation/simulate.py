@@ -800,6 +800,55 @@ def main() -> None:
     uncertainties = torch.cat(all_uncertainties, dim=0)  # [n_trajectories, time_steps, uncertainty_dim]
     estimated_states = torch.cat(all_estimated_states, dim=0)  # [n_trajectories, time_steps, state_dim]
     
+    # ── Safety / outcome classification per trajectory ────────────────────
+    # For each trajectory: collision (failure_function ≤ 0 at any step),
+    #                     success  (target_function ≤ 0 at any step, no collision),
+    #                     missed   (neither — survived but didn't reach goal).
+    outcomes: list[str] = []
+    try:
+        # Check whichever of failure_function / target_function the system exposes
+        fail_fn = getattr(system, 'failure_function', None)
+        target_fn = getattr(system, 'target_function', None)
+        states_dev = states.to(device) if isinstance(states, torch.Tensor) else states
+        for i in range(states_dev.shape[0]):
+            traj = states_dev[i]   # [T+1, state_dim]
+            collided = False
+            succeeded = False
+            if fail_fn is not None:
+                f_vals = fail_fn(traj).detach().cpu().numpy()
+                collided = bool((f_vals <= 0.0).any())
+            if target_fn is not None:
+                t_vals = target_fn(traj).detach().cpu().numpy()
+                # success = entered goal region at any point AND didn't collide first
+                if (t_vals <= 0.0).any():
+                    if collided:
+                        # Find time of first goal-entry vs first collision
+                        t_idx = int(np.argmax(t_vals <= 0.0))
+                        c_idx = int(np.argmax(f_vals <= 0.0))
+                        succeeded = (t_idx < c_idx)
+                    else:
+                        succeeded = True
+            if collided and not succeeded:
+                outcomes.append('collision')
+            elif succeeded:
+                outcomes.append('success')
+            else:
+                outcomes.append('missed_goal')
+    except Exception as exc:
+        print(f"⚠ Could not classify trajectory outcomes: {exc}")
+        outcomes = ['unknown'] * int(states.shape[0])
+
+    # Print summary
+    n = len(outcomes)
+    counts = {k: outcomes.count(k) for k in ('success', 'collision', 'missed_goal', 'unknown')}
+    print(f"\n── Trajectory outcomes ({n} total) ──")
+    for k, v in counts.items():
+        if v > 0:
+            print(f"  {k:<12}  {v:>3}/{n}  ({100.0*v/n:5.1f}%)")
+    if n <= 20:
+        # Per-trajectory breakdown for small batches
+        print(f"  per-traj: " + ', '.join(f'#{i}:{o}' for i, o in enumerate(outcomes)))
+
     # Move to CPU for saving
     def _to_cpu_tensor(tensor):
         if isinstance(tensor, torch.Tensor):
@@ -848,6 +897,7 @@ def main() -> None:
         'use_gpu': use_gpu,
         'batch_size': batch_size,
         'n_trajectories': n_trajectories,
+        'outcomes': outcomes,   # per-trajectory: 'success' | 'collision' | 'missed_goal' | 'unknown'
         # Store batched results as tensors (all trajectories together)
         'states': states,  # [n_trajectories, time_steps+1, state_dim]
         'controls': controls,  # [n_trajectories, time_steps, control_dim]

@@ -5,7 +5,7 @@ set -e
 # regardless of how the script is launched.
 source "$(dirname "$0")/env/bin/activate"
 
-EXP=sparse # sparse | medium | dense
+EXP=medium # sparse | medium | dense
 
 SYSTEM=RoverParam   # RoverDark | RoverBaseline | RoverParam
 # SYSTEM=RoverDark   # RoverDark | RoverBaseline
@@ -19,15 +19,20 @@ CONTROLLER=MPC #MPC | MPC_NN
 
 
 # MPC
-python scripts/param_mpc/visualize_param_mpc.py --lambdas 0.2 0.4 0.6 0.8 1.0 
+# python scripts/param_mpc/visualize_param_mpc.py --lambdas 0.2 0.4 0.6 0.8 1.0 
+# python scripts/param_mpc/visualize_param_mpc.py --lambdas 0.2 --velocities 3.0 4.0 5.0 6.0 7.0
+# python scripts/param_mpc/visualize_param_mpc.py --lambdas 0.5 --velocities 3.0 4.0 5.0 6.0 7.0
+
+
+
 
 # === Stage 1: Build GridInput (MPC control evaluated on state grid) [~7 minutes]
 
-# for EXP in sparse medium dense; do
-#     export ROVER_PARAM_SCENARIO=$EXP
-#     python scripts/grid_input/build_grid_input.py --system $SYSTEM --input ${SYSTEM}_${CONTROLLER} --tag ${EXP}_${SYSTEM}_${CONTROLLER} --force
-#     python scripts/grid_input/visualize_grid_input.py --tag ${EXP}_${SYSTEM}_${CONTROLLER}
-# done
+for EXP in sparse medium dense; do
+    export ROVER_PARAM_SCENARIO=$EXP
+    python scripts/grid_input/build_grid_input.py --system $SYSTEM --input ${SYSTEM}_${CONTROLLER} --tag ${EXP}_${SYSTEM}_${CONTROLLER} --force
+    python scripts/grid_input/visualize_grid_input.py --tag ${EXP}_${SYSTEM}_${CONTROLLER}
+done
 
 
 # for EXP in sparse medium dense; do

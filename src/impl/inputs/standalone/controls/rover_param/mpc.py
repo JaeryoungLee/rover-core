@@ -1,9 +1,11 @@
 """Parameterized MPC controller for the RoverParam system.
 
-Reads λ from state[..., 3] and passes it as a CasADi _p parameter so the NLP
-is compiled only once and λ is substituted numerically at every solve step.
+Reads (λ, v) from state[..., 3:5] and passes them as CasADi _p parameters so
+the NLP is compiled only once and (λ, v) are substituted numerically at every
+solve step.
 
   obstacle_weight = λ * RoverParam.OBSTACLE_WEIGHT_MAX
+  vehicle_speed   = v   (operator-set cruise speed, m/s)
 """
 
 from __future__ import annotations
@@ -26,19 +28,20 @@ __all__ = ["RoverParam_MPC"]
 
 # ── model / MPC builders ──────────────────────────────────────────────────────
 
-def _build_dubins_model(speed: float) -> do_mpc.model.Model:
+def _build_dubins_model() -> do_mpc.model.Model:
     model = do_mpc.model.Model('continuous')
     px    = model.set_variable('_x', 'px')
     py    = model.set_variable('_x', 'py')
     theta = model.set_variable('_x', 'theta')
     omega = model.set_variable('_u', 'omega')
-    # λ as a static parameter over the prediction horizon
-    lam   = model.set_variable('_p', 'lam')   
-    model.set_rhs('px',    speed * ca.cos(theta))
-    model.set_rhs('py',    speed * ca.sin(theta))
+    # Static parameters substituted at every solve step
+    lam   = model.set_variable('_p', 'lam')
+    v     = model.set_variable('_p', 'v')
+    model.set_rhs('px',    v * ca.cos(theta))
+    model.set_rhs('py',    v * ca.sin(theta))
     model.set_rhs('theta', omega)
     model.setup()
-    return model, lam
+    return model, lam, v
 
 
 def _softplus(value: ca.MX, beta: float = 10.0) -> ca.MX:
@@ -53,6 +56,7 @@ def _circle_signed_distance(px, py, params: Tuple[float, ...]) -> ca.MX:
 def _build_dubins_mpc(
     model: do_mpc.model.Model,
     lam_sym: ca.MX,
+    v_sym: ca.MX,            # accepted for symmetry; not used in cost (only via dynamics)
     dt: float,
     horizon: int,
     control_weight: float,
@@ -99,6 +103,7 @@ def _build_dubins_mpc(
     # Provide a default p_fun so setup() doesn't complain; updated before each solve
     p_template = mpc.get_p_template(1)
     p_template['_p', 0, 'lam'] = 0.0
+    p_template['_p', 0, 'v']   = 1.0   # arbitrary nonzero default
     mpc.set_p_fun(lambda _: p_template)
     mpc.setup()
     return mpc
@@ -112,11 +117,11 @@ _W_PTEMPL = None
 
 
 def _worker_init(dt, horizon, control_weight, obstacle_weight_max, obstacle_margin,
-                 speed, control_lower, control_upper, goal, obstacles):
+                 control_lower, control_upper, goal, obstacles):
     global _W_MPC, _W_PINIT, _W_PTEMPL
-    model, lam_sym = _build_dubins_model(speed)
+    model, lam_sym, v_sym = _build_dubins_model()
     _W_MPC = _build_dubins_mpc(
-        model, lam_sym, dt, horizon, control_weight,
+        model, lam_sym, v_sym, dt, horizon, control_weight,
         control_lower, control_upper, goal, obstacles,
         obstacle_weight_max, obstacle_margin,
     )
@@ -125,13 +130,14 @@ def _worker_init(dt, horizon, control_weight, obstacle_weight_max, obstacle_marg
 
 
 def _worker_compute(args):
-    """Compute MPC control for one (state_row, lam_val) pair."""
+    """Compute MPC control for one (state_row, lam_val, v_val) tuple."""
     global _W_MPC, _W_PINIT, _W_PTEMPL
-    state_row, lam_val = args
+    state_row, lam_val, v_val = args
     col = np.asarray(state_row, dtype=float).reshape(-1, 1)
 
-    # Update the parameter template with current λ
+    # Update the parameter template with current (λ, v)
     _W_PTEMPL['_p', 0, 'lam'] = float(lam_val)
+    _W_PTEMPL['_p', 0, 'v']   = float(v_val)
     _W_MPC.set_p_fun(lambda _: _W_PTEMPL)
 
     _W_MPC.x0 = col
@@ -185,7 +191,6 @@ class RoverParam_MPC(Input):
             raise TypeError(f'RoverParam_MPC requires RoverParam, got {type(system).__name__}')
 
         self._physical_dim     = 3  # px, py, heading
-        self._speed            = float(system.v)
         self._obstacle_wt_max  = float(system.OBSTACLE_WEIGHT_MAX)
 
         init = system.initial_state[:3]
@@ -198,11 +203,12 @@ class RoverParam_MPC(Input):
         self._obstacles = self._extract_obstacles(system)
 
         # Build sequential (fallback) MPC
-        model, lam_sym = _build_dubins_model(self._speed)
+        model, lam_sym, v_sym = _build_dubins_model()
         self.model   = model
         self._lam_sym = lam_sym
+        self._v_sym   = v_sym
         self.mpc     = _build_dubins_mpc(
-            model, lam_sym, self.dt, self.horizon, self.control_weight,
+            model, lam_sym, v_sym, self.dt, self.horizon, self.control_weight,
             self._ctrl_lo, self._ctrl_hi, tuple(self._goal),
             self._obstacles, self._obstacle_wt_max, self.obstacle_margin,
         )
@@ -233,16 +239,17 @@ class RoverParam_MPC(Input):
             initargs=(
                 self.dt, self.horizon, self.control_weight,
                 self._obstacle_wt_max, self.obstacle_margin,
-                self._speed, self._ctrl_lo, self._ctrl_hi,
+                self._ctrl_lo, self._ctrl_hi,
                 tuple(self._goal), self._obstacles,
             ),
         )
 
     # ── single-state solve ────────────────────────────────────────────────
 
-    def _solve_one(self, state_row: np.ndarray, lam_val: float) -> torch.Tensor:
+    def _solve_one(self, state_row: np.ndarray, lam_val: float, v_val: float) -> torch.Tensor:
         col = state_row[:self._physical_dim].reshape(-1, 1)
         self._p_template['_p', 0, 'lam'] = lam_val
+        self._p_template['_p', 0, 'v']   = v_val
         self.mpc.set_p_fun(lambda _: self._p_template)
         self.mpc.x0 = col
         if not self._initialised:
@@ -258,22 +265,22 @@ class RoverParam_MPC(Input):
             raise RuntimeError('RoverParam_MPC must be bound before use.')
 
         x = torch.as_tensor(state)
-        if x.shape[-1] != 4:
-            raise ValueError(f'Expected 4D state (px,py,heading,λ), got shape {tuple(x.shape)}')
+        if x.shape[-1] != 5:
+            raise ValueError(f'Expected 5D state (px,py,heading,λ,v), got shape {tuple(x.shape)}')
 
         batch_shape = x.shape[:-1]
         dtype, device = x.dtype, x.device
-        flat = x.detach().cpu().to(torch.float64).reshape(-1, 4).numpy()
+        flat = x.detach().cpu().to(torch.float64).reshape(-1, 5).numpy()
         B = flat.shape[0]
 
         use_par = self.num_workers > 1 and B >= self.parallel_threshold and self._pool is not None
 
         if use_par:
-            args = [(row[:3], float(row[3])) for row in flat]
+            args = [(row[:3], float(row[3]), float(row[4])) for row in flat]
             results = self._pool.map(_worker_compute, args)
             ctrl = torch.from_numpy(np.array(results, dtype=np.float32))
         else:
-            ctrl = torch.stack([self._solve_one(row, float(row[3])) for row in flat])
+            ctrl = torch.stack([self._solve_one(row, float(row[3]), float(row[4])) for row in flat])
 
         return ctrl.reshape(*batch_shape, self.dim).to(dtype=dtype, device=device)
 
@@ -283,7 +290,7 @@ class RoverParam_MPC(Input):
         self._initialised = False
         if hasattr(self, 'mpc') and hasattr(self.mpc, 'reset_history'):
             self.mpc.reset_history()
-        if self.num_workers > 1 and hasattr(self, '_speed'):
+        if self.num_workers > 1 and hasattr(self, '_ctrl_lo'):
             self._start_pool()
 
     def _cleanup_pool(self) -> None:

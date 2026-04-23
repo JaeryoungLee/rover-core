@@ -34,13 +34,14 @@ class RuntimeRoverParam(HJReachabilityDynamics):
 class _RoverParamBase(HJSolverDynamics):
     """Shared base for RoverParam HJ dynamics variants.
 
-    Unicycle dynamics augmented with λ as a frozen virtual state (λ̇ = 0).
-    The λ dimension contributes zero to the Hamiltonian.
+    Unicycle dynamics augmented with TWO frozen virtual states:
+      - λ  ∈ [0,1]   controller obstacle weight   (λ̇ = 0)
+      - v  ∈ [V_MIN, V_MAX]  vehicle cruise speed  (v̇ = 0)
+    Both contribute zero to the Hamiltonian.
     """
 
     def __init__(self) -> None:
         self.system = RoverParamSystem()
-        self._v = self.system.v
 
     def __call__(self, state, control, disturbance, time):
         raise NotImplementedError("Use hamiltonian() method instead")
@@ -58,20 +59,22 @@ class _RoverParamBase(HJSolverDynamics):
         value: jnp.ndarray,
         grad_value_box: Any,
     ) -> jnp.ndarray:
-        """Max magnitudes of Hamiltonian partials for the 4D augmented state.
+        """Max magnitudes of Hamiltonian partials for the 5D augmented state.
 
-        H = dVdx·v·cos(θ) + dVdy·v·sin(θ) + dVdθ·ω + dVdλ·0
+        H = dVdx·v·cos(θ) + dVdy·v·sin(θ) + dVdθ·ω + dVdλ·0 + dVdv·0
             ∂H/∂(dVdx)  = v·cos(θ)
             ∂H/∂(dVdy)  = v·sin(θ)
             ∂H/∂(dVdθ)  = ω  (bounded by control limits)
-            ∂H/∂(dVdλ)  = 0  (λ is frozen)
+            ∂H/∂(dVdλ)  = 0  (λ frozen)
+            ∂H/∂(dVdv)  = 0  (v frozen)
         """
         theta = state[2]
-        partial_x_mag = jnp.abs(self._v * jnp.cos(theta))
-        partial_y_mag = jnp.abs(self._v * jnp.sin(theta))
+        v     = state[4]
+        partial_x_mag = jnp.abs(v * jnp.cos(theta))
+        partial_y_mag = jnp.abs(v * jnp.sin(theta))
         omega_min, omega_max = self._get_control_bounds(state, time)
         partial_theta_mag = jnp.max(jnp.abs(jnp.array([omega_min, omega_max])))
-        return jnp.array([partial_x_mag, partial_y_mag, partial_theta_mag, 0.0])
+        return jnp.array([partial_x_mag, partial_y_mag, partial_theta_mag, 0.0, 0.0])
 
 
 class RoverParam(_RoverParamBase):
@@ -99,12 +102,13 @@ class RoverParam(_RoverParamBase):
         return lower_ctrl[0], upper_ctrl[0]
 
     def hamiltonian(self, state: jnp.ndarray, time: float, value: jnp.ndarray, grad_value: jnp.ndarray) -> jnp.ndarray:
-        """H = dVdx·v·cos(θ) + dVdy·v·sin(θ) + dVdθ·ω*  (dVdλ·0 omitted)."""
+        """H = dVdx·v·cos(θ) + dVdy·v·sin(θ) + dVdθ·ω*  (dVdλ·0, dVdv·0 omitted)."""
         dVdx, dVdy, dVdtheta = grad_value[0], grad_value[1], grad_value[2]
         theta = state[2]
+        v     = state[4]
         optimal_omega = self.jax_grid_set.argmax_support(
             jnp.array([self._adversary_sign * dVdtheta]), state, time)[0]
-        return dVdx * self._v * jnp.cos(theta) + dVdy * self._v * jnp.sin(theta) + dVdtheta * optimal_omega
+        return dVdx * v * jnp.cos(theta) + dVdy * v * jnp.sin(theta) + dVdtheta * optimal_omega
 
     def bind_control_set(self, given_set: Set) -> None:
         self.control.given_set = given_set
@@ -149,8 +153,9 @@ class RoverParam(_RoverParamBase):
             if mask.any():
                 uncertainty[mask] = (best_xhat - state_flat)[mask]
 
-        # Zero out λ component — it has no uncertainty by design
+        # Zero out λ and v components — they have no uncertainty by design
         uncertainty[:, 3] = 0.0
+        uncertainty[:, 4] = 0.0
 
         return uncertainty.reshape(original_shape)
 
@@ -177,5 +182,6 @@ class RoverParamNominal(_RoverParamBase):
     def hamiltonian(self, state: jnp.ndarray, time: float, value: jnp.ndarray, grad_value: jnp.ndarray) -> jnp.ndarray:
         dVdx, dVdy, dVdtheta = grad_value[0], grad_value[1], grad_value[2]
         theta = state[2]
+        v     = state[4]
         omega = self._jax_grid_input.value(state, time)[0]
-        return dVdx * self._v * jnp.cos(theta) + dVdy * self._v * jnp.sin(theta) + dVdtheta * omega
+        return dVdx * v * jnp.cos(theta) + dVdy * v * jnp.sin(theta) + dVdtheta * omega

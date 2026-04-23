@@ -266,12 +266,16 @@ def solve_hj_reachability(
     chunk = max(1, min(chunk, n_times))
     print(f"  Time chunks: {chunk} steps at a time (set GRAD_TIME_CHUNK to override)")
 
+    from tqdm import tqdm
     grad_chunks = []
-    for t0 in range(0, n_times, chunk):
-        t1 = min(t0 + chunk, n_times)
-        gc = chunked_grad(values[t0:t1])
-        # Move to host immediately to free GPU memory before the next chunk
-        grad_chunks.append(np.asarray(gc))
+    chunk_starts = list(range(0, n_times, chunk))
+    with tqdm(total=n_times, desc='gradients', unit='step') as pbar:
+        for t0 in chunk_starts:
+            t1 = min(t0 + chunk, n_times)
+            gc = chunked_grad(values[t0:t1])
+            # Move to host immediately to free GPU memory before the next chunk
+            grad_chunks.append(np.asarray(gc))
+            pbar.update(t1 - t0)
     gradients = np.concatenate(grad_chunks, axis=0)
 
     print(f"✓ Gradients computed (chunked vmap, chunk={chunk})")

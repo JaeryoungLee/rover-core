@@ -497,7 +497,7 @@ def main():
 
             for tval in times:
                 print(f"  Slice {idx+1}: dims={dims}, fixed={fixed}, t={tval}")
-                fixed_str = '_'.join([f"{k}{v}" for k, v in sorted(fixed.items())])
+                fixed_str = '_'.join([f"{k}{float(v):.2f}" for k, v in sorted(fixed.items())])
                 for input_dim in range(grid_set.input_dim):
                     fig = visualize_bounds_2d(
                         grid_set,
