@@ -25,13 +25,20 @@ RoverBaseline:
     time_resolution: 100
 
 RoverParam:
-  # 5D state: [px, py, theta, lambda, v]
-  # 5D BRT memory ≈ ∏(state_res) × time × 4 bytes; e.g. [40,40,25,11,11]×101 ≈ 0.5GB
+  # 5D state: [px, py, theta, lambda_obs, lambda_unc]
+  # px bumped to 51 (cell 0.40 m) so it matches py/θ visibility thresholds for
+  # parametric uncertainty (MAX_UNC=(0.8, 0.5, 0.4) → all dims clear 1 cell at λ_unc≥0.5).
+  # Memory: 51×41×31×11×11×101 × 4B ≈ 1.2 GB per V/grad array.
   RoverParam_MPC:
-    state_resolution: [40, 40, 40, 11, 11]
-    time_resolution: 101
+    state_resolution: [71, 71, 101, 6, 6]
+    time_resolution: 51
+
+    # for testing
+    # state_resolution: [11, 11, 11, 5, 5]
+    # time_resolution: 101
+
 
   default:
-    state_resolution: [40, 40, 25, 11, 11]
+    state_resolution: [51, 41, 31, 11, 11]
     time_resolution: 101
 

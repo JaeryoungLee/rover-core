@@ -51,7 +51,7 @@ class RoverBaseline(RoverBase):
 
     # System parameters
     v = 5.0  # constant speed (m/s)
-    time_horizon = 8.0  # s
+    time_horizon = 5.0  # s
 
     # Time-invariant uncertainty bounds (fixed, not scaled by time)
     terminal_uncertainty_limits: Tuple[Tuple[float, ...], Tuple[float, ...]] = (
@@ -75,7 +75,7 @@ class RoverBaseline(RoverBase):
     obstacles = (
         Circle2D(center=(16.0, 0.0), radius=1.0),
     )
-    goal_state = torch.tensor([20.0, 0.0, 0.0], dtype=torch.float32)
+    goal_state = torch.tensor([18.0, 0.0, 0.0], dtype=torch.float32)
     goal_radius: float = 0.5
 
     _render_title = "RoverBaseline"

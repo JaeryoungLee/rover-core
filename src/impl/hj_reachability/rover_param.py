@@ -35,13 +35,14 @@ class _RoverParamBase(HJSolverDynamics):
     """Shared base for RoverParam HJ dynamics variants.
 
     Unicycle dynamics augmented with TWO frozen virtual states:
-      - λ  ∈ [0,1]   controller obstacle weight   (λ̇ = 0)
-      - v  ∈ [V_MIN, V_MAX]  vehicle cruise speed  (v̇ = 0)
-    Both contribute zero to the Hamiltonian.
+      - λ_obs ∈ [0,1]                       controller obstacle weight   (λ̇ = 0)
+      - λ_unc ∈ [LAM_UNC_MIN, LAM_UNC_MAX]  perception-uncertainty scale (λ̇ = 0)
+    Both contribute zero to the Hamiltonian. v is constant from the system.
     """
 
     def __init__(self) -> None:
         self.system = RoverParamSystem()
+        self._v = float(self.system.v)
 
     def __call__(self, state, control, disturbance, time):
         raise NotImplementedError("Use hamiltonian() method instead")
@@ -61,15 +62,15 @@ class _RoverParamBase(HJSolverDynamics):
     ) -> jnp.ndarray:
         """Max magnitudes of Hamiltonian partials for the 5D augmented state.
 
-        H = dVdx·v·cos(θ) + dVdy·v·sin(θ) + dVdθ·ω + dVdλ·0 + dVdv·0
-            ∂H/∂(dVdx)  = v·cos(θ)
-            ∂H/∂(dVdy)  = v·sin(θ)
-            ∂H/∂(dVdθ)  = ω  (bounded by control limits)
-            ∂H/∂(dVdλ)  = 0  (λ frozen)
-            ∂H/∂(dVdv)  = 0  (v frozen)
+        H = dVdx·v·cos(θ) + dVdy·v·sin(θ) + dVdθ·ω + dVdλ_obs·0 + dVdλ_unc·0
+            ∂H/∂(dVdx)     = v·cos(θ)
+            ∂H/∂(dVdy)     = v·sin(θ)
+            ∂H/∂(dVdθ)     = ω  (bounded by control limits)
+            ∂H/∂(dVdλ_obs) = 0  (λ_obs frozen)
+            ∂H/∂(dVdλ_unc) = 0  (λ_unc frozen)
         """
         theta = state[2]
-        v     = state[4]
+        v     = self._v
         partial_x_mag = jnp.abs(v * jnp.cos(theta))
         partial_y_mag = jnp.abs(v * jnp.sin(theta))
         omega_min, omega_max = self._get_control_bounds(state, time)
@@ -105,7 +106,7 @@ class RoverParam(_RoverParamBase):
         """H = dVdx·v·cos(θ) + dVdy·v·sin(θ) + dVdθ·ω*  (dVdλ·0, dVdv·0 omitted)."""
         dVdx, dVdy, dVdtheta = grad_value[0], grad_value[1], grad_value[2]
         theta = state[2]
-        v     = state[4]
+        v     = self._v
         optimal_omega = self.jax_grid_set.argmax_support(
             jnp.array([self._adversary_sign * dVdtheta]), state, time)[0]
         return dVdx * v * jnp.cos(theta) + dVdy * v * jnp.sin(theta) + dVdtheta * optimal_omega
@@ -182,6 +183,6 @@ class RoverParamNominal(_RoverParamBase):
     def hamiltonian(self, state: jnp.ndarray, time: float, value: jnp.ndarray, grad_value: jnp.ndarray) -> jnp.ndarray:
         dVdx, dVdy, dVdtheta = grad_value[0], grad_value[1], grad_value[2]
         theta = state[2]
-        v     = state[4]
+        v     = self._v
         omega = self._jax_grid_input.value(state, time)[0]
         return dVdx * v * jnp.cos(theta) + dVdy * v * jnp.sin(theta) + dVdtheta * omega

@@ -25,60 +25,53 @@ RoverParam:
 
   default:
     default:
-      # 5D state: 0=px, 1=py, 2=θ, 3=λ, 4=v
-      resolution: [40, 40, 25, 11, 11]
+      # 5D state: 0=px, 1=py, 2=θ, 3=λ_obs, 4=λ_unc
+      resolution: [51, 41, 31, 11, 11]
 
       # ── parameter sweeps (one figure per sweep, subplots over sweep_values) ──
       sweeps:
-        # λ sweep at fixed v=4: 6 evenly-spaced grid points along the λ axis
-        - dims: [0, 1]
-          sweep_dim: 3
-          sweep_n: 6
-          fixed: {2: 0.0, 4: 3.0}
-          time: 0.0
-          title: "Initial BRT (x,y) across λ | heading=0, v=4"
-
-        # v sweep at fixed λ=0.5: ALL grid points along the v axis (omit sweep_*)
-        - dims: [0, 1]
-          sweep_dim: 4
-          fixed: {2: 0.0, 3: 1.0}
-          time: 0.0
-          title: "Initial BRT (x,y) across v | heading=0, λ=0.5"
-
-        # v sweep at fixed λ=1.0: 5 evenly-spaced grid points
+        # λ_obs sweep at fixed λ_unc=0.5 (moderate perception noise)
         - dims: [0, 1]
           sweep_dim: 4
           sweep_n: 5
-          fixed: {2: 0.0, 3: 1.0}
+          fixed: {2: 0.0, 3: 0.5}
           time: 0.0
-          title: "Initial BRT (x,y) across v | heading=0, λ=1.0"
+          title: "BRT (x,y) across λ_unc | heading=0, λ_obs=0.5"
+
+        # λ_unc sweep at fixed λ_obs=0.5
+        - dims: [0, 1]
+          sweep_dim: 3
+          sweep_n: 5
+          fixed: {2: 0.0, 4: 0.5}
+          time: 0.0
+          title: "BRT (x,y) across λ_obs | heading=0, λ_unc=0.5"
 
       # ── single-time slices (full BRT field at given fixed point) ────────────
       # `expand_dim` (priority: expand_values | expand_n | all grid points) generates
-      # one slice per grid point along that dim — title gets the actual value appended,
-      # so the title and the snapped fixed value can never disagree.
+      # one slice per grid point along that dim — title gets the actual value appended.
       slices:
-        # px-py plane at heading=0, λ=0.5 — one figure per v grid point (5 of them)
+        # px-py at fixed λ_unc=0.5, expanding over λ_obs
         - dims: [0, 1]
-          fixed: {2: 0.0, 3: 1.0, 4: 3.0}
-          # expand_dim: 4
-          # expand_n: 3
+          fixed: {2: 0.0, 4: 0.5}
+          expand_dim: 3
+          expand_n: 4
           times: [0.0]
-          title: "Position (x,y) | heading=0, λ=0.5"
+          title: "Position (x,y) | heading=0, λ_unc=0.5"
 
-        # # px-py plane at heading=0, v=4 — one figure per λ grid point (5 of them)
-        # - dims: [0, 1]
-        #   fixed: {2: 0.0, 4: 4.0}
-        #   expand_dim: 3
-        #   expand_n: 5
-        #   times: [0.0]
-        #   title: "Position (x,y) | heading=0, v=4"
+        # px-py at fixed λ_obs=0.5, expanding over λ_unc
+        - dims: [0, 1]
+          fixed: {2: 0.0, 3: 0.5}
+          expand_dim: 4
+          expand_n: 6
+          times: [0.0]
+          title: "Position (x,y) | heading=0, λ_obs=0.5"
 
-        # # # 2D parameter plane: λ × v at the rover's likely starting position
-        # - dims: [3, 4]
-        #   fixed: {0: 2.5, 1: 0.0, 2: 0.0}
-        #   times: [0.0]
-        #   title: "BRT in (λ, v)-plane | start at (2.5, 0, 0)"
+        # 2D (λ_obs, λ_unc) plane at the rover's typical starting position
+        # — this is the parameter-space view of the BRT at a specific IC.
+        - dims: [3, 4]
+          fixed: {0: 2.5, 1: 0.0, 2: 0.0}
+          times: [0.0]
+          title: "BRT in (λ_obs, λ_unc)-plane | start at (2.5, 0, 0)"
 
 RoverDark:
   

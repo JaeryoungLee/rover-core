@@ -36,8 +36,8 @@ __all__ = ["RoverParam", "OBSTACLE_SCENARIOS"]
 OBSTACLE_SCENARIOS: dict = {
     'sparse': {
         'obstacles': (
-            Circle2D(center=(8.0,  1.0), radius=1.0),
-            Circle2D(center=(14.0, -1.0), radius=1.0),
+            Circle2D(center=(6.0,  1.0), radius=1.0),
+            Circle2D(center=(12.0, -1.0), radius=1.0),
         ),
         'obstacle_weight_max': 40.0,
     },
@@ -72,54 +72,54 @@ _CFG = OBSTACLE_SCENARIOS[_SELECTED_SCENARIO]
 
 
 class RoverParam(RoverBaseline):
-    """RoverBaseline with (λ, v) appended as 4th and 5th virtual state dimensions."""
+    """RoverBaseline with (λ_obs, λ_unc) appended as 4th and 5th virtual state dimensions.
+
+    λ_obs ∈ [0, 1] — normalized MPC obstacle-weight (× OBSTACLE_WEIGHT_MAX)
+    λ_unc ∈ [LAM_UNC_MIN, LAM_UNC_MAX] — scales the perception-uncertainty bound:
+        e ∈ λ_unc · MAX_UNC
+    Both are frozen virtual states (no dynamics, no uncertainty on themselves).
+
+    Vehicle speed v is now constant at self.v (inherited from RoverBaseline).
+    """
 
     SCENARIO: str = _SELECTED_SCENARIO
     OBSTACLE_WEIGHT_MAX: float = _CFG['obstacle_weight_max']
     obstacles = _CFG['obstacles']
 
-    # Speed range (operator-set cap). v=2.0 was the RoverBaseline default; we span
-    # [1.0, 5.0] so the BRT spans walking pace through highway-relative speeds.
-    V_MIN: float = 3.0
-    V_MAX: float = 7.0
+    # Range of the λ_unc parameter — controls how big the assumed perception error is.
+    # 1.0 → MAX_UNC (worst case); 0.3 → 30% of that.
+    LAM_UNC_MIN: float = 0.3
+    LAM_UNC_MAX: float = 1.0
+
+    # Maximum perception-error bound, attained at λ_unc = 1.0. Spatial dims only;
+    # λ and λ_unc themselves have zero uncertainty.
+    MAX_UNC_LO: Tuple[float, ...] = (-0.8, -0.5, -0.4, 0.0, 0.0)
+    MAX_UNC_HI: Tuple[float, ...] = ( 0.8,  0.5,  0.4, 0.0, 0.0)
 
     # ── augmented state ──────────────────────────────────────────────────
     state_dim = 5
     state_limits = torch.tensor(
         [
-            [0.0, -5.0, -math.pi, 0.0, V_MIN],   # lo: px, py, θ, λ, v
-            [20.0,  5.0,  math.pi, 1.0, V_MAX],  # hi
+            [0.0, -5.0, -math.pi, 0.0, LAM_UNC_MIN],   # lo: px, py, θ, λ_obs, λ_unc
+            [20.0,  5.0,  math.pi, 1.0, LAM_UNC_MAX],  # hi
         ],
         dtype=torch.float32,
     )
     state_periodic = [False, False, True, False, False]
     state_labels = (r'$p_x$ (m)', r'$p_y$ (m)', r'$\theta$ (rad)',
-                    r'$\lambda$', r'$v$ (m/s)')
+                    r'$\lambda_{\mathrm{obs}}$', r'$\lambda_{\mathrm{unc}}$')
 
-    # ── uncertainty presets: pad RoverBaseline presets with (λ, v) = 0 ───
+    # uncertainty_presets are no longer used (uncertainty_limits is parametric per cell)
+    # — kept for backward-compat with build_grid_set's --uncertainty-preset flag.
+    # Setting them all equal to MAX_UNC means the preset only acts as an *upper cap*;
+    # the actual per-cell bounds come from λ_unc · MAX_UNC inside uncertainty_limits.
     terminal_uncertainty_limits: Tuple[Tuple[float, ...], Tuple[float, ...]] = (
-        (-0.5, -0.5, -0.1, 0.0, 0.0),
-        ( 0.5,  0.5,  0.1, 0.0, 0.0),
+        MAX_UNC_LO, MAX_UNC_HI,
     )
-    # uncertainty_presets: dict = {
-    #     "zero":     (( 0.0,  0.0,  0.00, 0.0, 0.0), ( 0.0,  0.0,  0.00, 0.0, 0.0)),
-    #     "small":    ((-0.2, -0.2, -0.04, 0.0, 0.0), ( 0.2,  0.2,  0.04, 0.0, 0.0)),
-    #     "moderate": ((-0.5, -0.5, -0.10, 0.0, 0.0), ( 0.5,  0.5,  0.10, 0.0, 0.0)),
-    #     "harsh":    ((-0.8, -0.8, -0.20, 0.0, 0.0), ( 0.8,  0.8,  0.20, 0.0, 0.0)),
-    # }
-    
-    # uncertainty_presets: dict = {
-    #     "zero":     (( 0.0,  0.0,  0.00, 0.0, 0.0), ( 0.0,  0.0,  0.00, 0.0, 0.0)),
-    #     "small":    ((-0.2, -0.2, -0.15, 0.0, 0.0), ( 0.2,  0.2,  0.15, 0.0, 0.0)),
-    #     "moderate": ((-0.5, -0.5, -0.20, 0.0, 0.0), ( 0.5,  0.5,  0.20, 0.0, 0.0)),
-    #     "harsh":    ((-0.8, -0.8, -0.30, 4.0, 0.0), ( 0.8,  0.8,  0.30, 0.0, 0.0)),
-    # }
-
     uncertainty_presets: dict = {
-        "zero":     (( 0.0,  0.0,  0.00, 0.0, 0.0), ( 0.0,  0.0,  0.00, 0.0, 0.0)),
-        "small":    ((-0.2, -0.2, -0.15, 0.0, 0.0), ( 0.2,  0.2,  0.15, 0.0, 0.0)),
-        "moderate": ((-0.5, -0.5, -0.20, 0.0, 0.0), ( 0.5,  0.5,  0.20, 0.0, 0.0)),
-        "harsh":    ((-0.8, -0.8, -0.30, 4.0, 0.0), ( 0.8,  0.8,  0.30, 0.0, 0.0)),
+        # All presets map to the same MAX bound; the parametric scaling happens
+        # via state[..., 4] inside uncertainty_limits().
+        "max": (MAX_UNC_LO, MAX_UNC_HI),
     }
 
     # ── helpers ──────────────────────────────────────────────────────────
@@ -141,11 +141,18 @@ class RoverParam(RoverBaseline):
         return lo, hi
 
     def uncertainty_limits(self, state, time):
-        lims = torch.tensor(
-            self.terminal_uncertainty_limits, dtype=state.dtype, device=state.device
-        )
-        lo = torch.broadcast_to(lims[0], state.shape[:-1] + (self.state_dim,))
-        hi = torch.broadcast_to(lims[1], state.shape[:-1] + (self.state_dim,))
+        """Per-state uncertainty bounds: e ∈ λ_unc(state) · MAX_UNC.
+
+        λ_unc is read from state[..., 4]. So adjacent cells with different λ_unc
+        get different uncertainty boxes — this is what makes the BRT parametric
+        in the perception-noise level.
+        """
+        lam_unc = state[..., 4:5]   # (..., 1)
+        max_lo = torch.tensor(self.MAX_UNC_LO, dtype=state.dtype, device=state.device)
+        max_hi = torch.tensor(self.MAX_UNC_HI, dtype=state.dtype, device=state.device)
+        # Broadcast: (..., 1) × (state_dim,) → (..., state_dim)
+        lo = lam_unc * max_lo
+        hi = lam_unc * max_hi
         return lo, hi
 
     # ── objective functions act on physical dims only ────────────────────
@@ -164,17 +171,17 @@ class RoverParam(RoverBaseline):
         dy = state[..., 1] - self.goal_state[1]
         return torch.hypot(dx, dy) - self.goal_radius
 
-    # ── dynamics: append λ̇ = 0, v̇ = 0 ──────────────────────────────────
+    # ── dynamics: λ_obṡ = 0, λ_unċ = 0; v is constant from system ────────
     def dynamics(self, state, control, disturbance, time):
-        x, y, heading, _lam, v = state.unbind(-1)
+        x, y, heading, _lam_obs, _lam_unc = state.unbind(-1)
         (omega,) = control.unbind(-1)
         return torch.stack(
             (
-                v * torch.cos(heading),
-                v * torch.sin(heading),
+                self.v * torch.cos(heading),
+                self.v * torch.sin(heading),
                 omega,
-                torch.zeros_like(omega),  # λ̇ = 0
-                torch.zeros_like(omega),  # v̇ = 0  (frozen — operator-set cruise)
+                torch.zeros_like(omega),  # λ_obṡ = 0
+                torch.zeros_like(omega),  # λ_unċ = 0
             ),
             dim=-1,
         )

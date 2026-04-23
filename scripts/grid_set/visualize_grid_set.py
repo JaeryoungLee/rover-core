@@ -482,7 +482,47 @@ def main():
             print(f"Using custom resolution from preset: {vis_resolution}")
         elif args.interpolate:
             print(f"No custom resolution in preset, will use cached grid resolution for interpolation")
-        for idx, sl in enumerate(vis_cfg['slices']):
+        # Expand any slice configs that specify `expand_dim` into N concrete slices
+        # (one per grid point along expand_dim). Modes (priority order):
+        #   1) expand_values: [v1, v2, ...]  — explicit values
+        #   2) expand_n: N                   — N evenly-spaced grid points
+        #   3) (omit both)                   — ALL grid points along expand_dim
+        expanded_slices = []
+        for sl in vis_cfg['slices']:
+            ed = sl.get('expand_dim')
+            if ed is None:
+                expanded_slices.append(sl)
+                continue
+            ed = int(ed)
+            if ed < 0 or ed >= len(grid_set._state_grid_points):
+                print(f"⚠ Skipping slice with invalid expand_dim={ed}")
+                continue
+            axis_arr = grid_set._state_grid_points[ed].detach().cpu().numpy()
+            if sl.get('expand_values') is not None:
+                expand_vals = [float(v) for v in sl['expand_values']]
+            elif sl.get('expand_n') is not None:
+                n = max(1, min(int(sl['expand_n']), len(axis_arr)))
+                idxs = np.linspace(0, len(axis_arr) - 1, n).round().astype(int)
+                expand_vals = [float(axis_arr[i]) for i in idxs]
+            else:
+                expand_vals = [float(x) for x in axis_arr]
+            base_fixed = dict(sl.get('fixed', {}) or {})
+            base_title = sl.get('title') or ''
+            for ev in expand_vals:
+                clone = dict(sl)
+                clone.pop('expand_dim', None)
+                clone.pop('expand_values', None)
+                clone.pop('expand_n', None)
+                new_fixed = dict(base_fixed)
+                new_fixed[ed] = float(ev)
+                clone['fixed'] = new_fixed
+                ed_label = system.state_labels[ed] if ed < len(system.state_labels) else f"dim_{ed}"
+                clone['title'] = f"{base_title} | {ed_label}={ev:.2f}".strip(' |')
+                expanded_slices.append(clone)
+        if any(sl.get('expand_dim') is not None for sl in vis_cfg['slices']):
+            print(f"  ↳ slice expansion: {len(vis_cfg['slices'])} configs → {len(expanded_slices)} concrete slices")
+
+        for idx, sl in enumerate(expanded_slices):
             dims = sl.get('dims', [0, 1])
             if 'dims' not in sl:
                 print(f"⚠ Warning: Slice missing 'dims', using default {dims}")
@@ -515,7 +555,7 @@ def main():
                         current_title = fig._suptitle.get_text() if fig._suptitle else ''
                         fig.suptitle(f"{title_prefix}\n{current_title}", fontsize=12)
                     figs.append(fig)
-                    fname = f"{system_name}_{input_name}_{args.preset}_slice{idx}_dims{''.join(map(str, dims))}"
+                    fname = f"{input_name}_{args.preset}_slice{idx}_dims{''.join(map(str, dims))}"
                     if fixed_str:
                         fname += f"_fix{fixed_str}"
                     fname += f"_indim{input_dim}_t{tval:.1f}.png"
@@ -534,7 +574,7 @@ def main():
                 equal_aspect=args.equal_aspect,
             )
             figs.append(fig)
-            filenames.append(f"{system_name}_{input_name}_default_indim{input_dim}.png")
+            filenames.append(f"{input_name}_default_indim{input_dim}.png")
 
     if args.save_dir:
         save_dir = Path(args.save_dir)

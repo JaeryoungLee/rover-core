@@ -1344,7 +1344,7 @@ def main():
                     same_color=args.same_color,
                     hide_est=args.hide_est,
                     dpi=args.dpi,
-                    xlim=tuple(args.xlim) if args.xlim else None,
+                    xlim=tuple(args.xlim) + (0, 1.0) if args.xlim else None,
                     ylim=tuple(args.ylim) if args.ylim else None,
                     value_tag=args.value_tag,
                     value_time=args.value_time,

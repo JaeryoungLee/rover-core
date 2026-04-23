@@ -218,10 +218,7 @@ def visualize_2d_slice(grid_input, system, time_val, dim1=0, dim2=1, fixed_dims=
             display_fixed[d] = v
     fixed_str = ', '.join([f"{system.state_labels[d] if d < len(system.state_labels) else f'dim_{d}'}={display_fixed[d]:.2f}"
                            for d in display_fixed])
-    title = f'{system.__class__.__name__} - {grid_input.wrapped_input.__class__.__name__} ({grid_input.type})\n'
-    title += f'Grid Resolution: {resolution1}×{resolution2}'
-    if fixed_str:
-        title += f' | Fixed: {fixed_str}'
+    title = f'Fixed: {fixed_str}' if fixed_str else ''
     
     # Only set suptitle if we're not using a provided axis (interactive mode handles title separately)
     if ax is None:
@@ -478,7 +475,8 @@ def main():
                 new_fixed = dict(base_fixed)
                 new_fixed[ed] = float(ev)
                 clone['fixed'] = new_fixed
-                clone['title'] = f"{base_title} | dim{ed}={ev:.2f}".strip(' |')
+                ed_label = system.state_labels[ed] if ed < len(system.state_labels) else f"dim_{ed}"
+                clone['title'] = f"{base_title} | {ed_label}={ev:.2f}".strip(' |')
                 expanded_slices.append(clone)
         if any(sl.get('expand_dim') is not None for sl in vis_cfg['slices']):
             print(f"  ↳ slice expansion: {len(vis_cfg['slices'])} configs → {len(expanded_slices)} concrete slices")
@@ -500,12 +498,9 @@ def main():
             for tval in times:
                 print(f"  Slice {idx+1}: dims={dims}, fixed={fixed}, t={tval}")
                 fig = visualize_2d_slice(grid_input, system, tval, dim1=dims[0], dim2=dims[1], fixed_dims=fixed, vis_resolution=vis_resolution)
-                if title_prefix:
-                    current_title = fig._suptitle.get_text() if fig._suptitle else ''
-                    fig.suptitle(f"{title_prefix}\n{current_title}", fontsize=12)
                 figs.append(fig)
                 fixed_str = '_'.join([f"{k}{float(v):.2f}" for k, v in sorted(fixed.items())])
-                fname = f"{system_name}_{input_name}_{args.preset}_slice{idx}_dims{''.join(map(str, dims))}"
+                fname = f"{input_name}_{args.preset}_slice{idx}_dims{''.join(map(str, dims))}"
                 if fixed_str:
                     fname += f"_fix{fixed_str}"
                 fname += f"_t{tval:.1f}.png"
@@ -514,7 +509,7 @@ def main():
         print("\nNo preset found; generating default slice dims=[0,1], t=0.0")
         fig = visualize_2d_slice(grid_input, system, 0.0, dim1=0, dim2=1)
         figs = [fig]
-        filenames = [f"{system_name}_{input_name}_default.png"]
+        filenames = [f"{input_name}_default.png"]
 
     # Determine save directory
     if args.save_dir:

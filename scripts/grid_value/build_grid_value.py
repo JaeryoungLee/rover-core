@@ -262,7 +262,7 @@ def solve_hj_reachability(
     n_times = values.shape[0]
     # Heuristic: ~1 GiB per time step at 51×51×51×11 grid; tune via env var if needed.
     import os
-    chunk = int(os.environ.get('GRAD_TIME_CHUNK', '4'))
+    chunk = int(os.environ.get('GRAD_TIME_CHUNK', '1'))
     chunk = max(1, min(chunk, n_times))
     print(f"  Time chunks: {chunk} steps at a time (set GRAD_TIME_CHUNK to override)")
 
